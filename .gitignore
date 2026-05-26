@@ -1,0 +1,5 @@
+/target
+nimbus.log
+pet_memory.json
+.DS_Store
+config.toml
