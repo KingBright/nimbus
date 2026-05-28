@@ -4,10 +4,10 @@
 LOG_FILE="nimbus.log"
 
 # 1. 查找并清理已有进程
-PID=$(pgrep -x "nimbus")
-if [ -n "$PID" ]; then
-    echo "发现正在运行的 Nimbus 桌宠 (PID: $PID)，正在终止..."
-    kill "$PID"
+PIDS=$(pgrep -x "nimbus")
+if [ -n "$PIDS" ]; then
+    echo "发现正在运行的 Nimbus 桌宠，正在终止..."
+    echo "$PIDS" | xargs kill
     sleep 0.5
 fi
 
@@ -24,17 +24,19 @@ if [ $? -ne 0 ]; then
 fi
 
 # 3. 自动探测二进制路径
-if [ -f "target/release/nimbus" ]; then
-    PET_BIN="target/release/nimbus"
-elif [ -f "/Users/jinliang/rust-target-nimbus/release/nimbus" ]; then
-    PET_BIN="/Users/jinliang/rust-target-nimbus/release/nimbus"
-elif [ -n "$CARGO_TARGET_DIR" ] && [ -f "$CARGO_TARGET_DIR/release/nimbus" ]; then
+METADATA_DIR=$(cargo metadata --format-version 1 | grep -o '"target_directory":"[^"]*' | cut -d'"' -f4)
+
+if [ -n "$CARGO_TARGET_DIR" ] && [ -f "$CARGO_TARGET_DIR/release/nimbus" ]; then
     PET_BIN="$CARGO_TARGET_DIR/release/nimbus"
+elif [ -f "$METADATA_DIR/release/nimbus" ]; then
+    PET_BIN="$METADATA_DIR/release/nimbus"
+elif [ -f "target/release/nimbus" ]; then
+    PET_BIN="target/release/nimbus"
 else
-    # 兜底：使用 cargo metadata 提取 target 目录
-    METADATA_DIR=$(cargo metadata --format-version 1 | grep -o '"target_directory":"[^"]*' | cut -d'"' -f4)
-    if [ -f "$METADATA_DIR/release/nimbus" ]; then
-        PET_BIN="$METADATA_DIR/release/nimbus"
+    if [ -f "/Users/jinliang/rust-target/release/nimbus" ]; then
+        PET_BIN="/Users/jinliang/rust-target/release/nimbus"
+    elif [ -f "/Users/jinliang/rust-target-nimbus/release/nimbus" ]; then
+        PET_BIN="/Users/jinliang/rust-target-nimbus/release/nimbus"
     else
         echo "❌ 未找到编译好的二进制文件！"
         exit 1

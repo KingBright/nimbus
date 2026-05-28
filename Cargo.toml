@@ -21,4 +21,3 @@ tokio-stream = "0.1"
 wgpu = "0.19"
 tray-icon = "0.14"
 mouse_position = "0.1.4"
-

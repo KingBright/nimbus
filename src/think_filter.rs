@@ -18,7 +18,11 @@ impl ThinkBlockFilter {
         Self {
             expose,
             buf: String::new(),
-            mode: if start_inside { "inside".to_string() } else { "outside".to_string() },
+            mode: if start_inside {
+                "inside".to_string()
+            } else {
+                "outside".to_string()
+            },
         }
     }
 
@@ -30,8 +34,12 @@ impl ThinkBlockFilter {
     pub fn flush(&mut self) -> Vec<FilterOutput> {
         let mut out = self.drain(true);
         if !self.buf.is_empty() {
-            let ev = if self.mode == "inside" && self.expose { "think" } else { "delta" };
-            if !(self.mode == "inside" && !self.expose) {
+            let ev = if self.mode == "inside" && self.expose {
+                "think"
+            } else {
+                "delta"
+            };
+            if self.mode != "inside" || self.expose {
                 out.push(FilterOutput {
                     event: ev.to_string(),
                     content: self.buf.clone(),
@@ -58,7 +66,7 @@ impl ThinkBlockFilter {
                     self.mode = "inside".to_string();
                 } else {
                     let safe_len = self.safe_emit_len(&self.buf, Self::OPEN_TAG);
-                    if safe_len <= 0 {
+                    if safe_len == 0 {
                         if final_drain && !self.buf.is_empty() {
                             out.push(FilterOutput {
                                 event: "delta".to_string(),
@@ -98,7 +106,7 @@ impl ThinkBlockFilter {
                     }
                 } else {
                     let safe_len = self.safe_emit_len(&self.buf, Self::CLOSE_TAG);
-                    if safe_len <= 0 {
+                    if safe_len == 0 {
                         return out;
                     }
                     let text = self.buf[..safe_len].to_string();
@@ -121,7 +129,7 @@ impl ThinkBlockFilter {
         let char_indices: Vec<(usize, char)> = buf.char_indices().collect();
         let tag_chars: Vec<char> = tag.chars().collect();
         let limit = std::cmp::min(max_keep, char_indices.len());
-        
+
         for keep in (1..=limit).rev() {
             let buf_tail: Vec<char> = char_indices[char_indices.len() - keep..]
                 .iter()
@@ -146,14 +154,15 @@ mod tests {
         let out1 = filter.feed("Hello ");
         let out2 = filter.feed("world!");
         let out3 = filter.flush();
-        
+
         let mut combined = Vec::new();
         combined.extend(out1);
         combined.extend(out2);
         combined.extend(out3);
-        
+
         // Verify combined output pieces
-        let merged_delta: String = combined.iter()
+        let merged_delta: String = combined
+            .iter()
             .filter(|o| o.event == "delta")
             .map(|o| o.content.as_str())
             .collect();
@@ -165,14 +174,20 @@ mod tests {
         let mut filter = ThinkBlockFilter::new(true, false);
         let out1 = filter.feed("Answer: <think>let me think</think> yes");
         let out2 = filter.flush();
-        
+
         let mut combined = Vec::new();
         combined.extend(out1);
         combined.extend(out2);
-        
-        assert!(combined.iter().any(|o| o.event == "think" && o.content == "let me think"));
-        assert!(combined.iter().any(|o| o.event == "delta" && o.content == "Answer: "));
-        assert!(combined.iter().any(|o| o.event == "delta" && o.content == " yes"));
+
+        assert!(combined
+            .iter()
+            .any(|o| o.event == "think" && o.content == "let me think"));
+        assert!(combined
+            .iter()
+            .any(|o| o.event == "delta" && o.content == "Answer: "));
+        assert!(combined
+            .iter()
+            .any(|o| o.event == "delta" && o.content == " yes"));
     }
 
     #[test]
@@ -180,11 +195,11 @@ mod tests {
         let mut filter = ThinkBlockFilter::new(false, false);
         let out1 = filter.feed("Answer: <think>secret thought</think> yes");
         let out2 = filter.flush();
-        
+
         let mut combined = Vec::new();
         combined.extend(out1);
         combined.extend(out2);
-        
+
         // Assert think output is hidden
         for o in &combined {
             assert_ne!(o.event, "think");

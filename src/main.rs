@@ -950,13 +950,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     last_draw_time = std::time::Instant::now();
                 }
                 WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                    let size = window_for_run.inner_size();
-                    let x_ratio = cursor_position.x / size.width as f64;
-                    let y_ratio = cursor_position.y / size.height as f64;
-                    let is_on_pet = x_ratio >= 0.22 && x_ratio <= 0.78 && y_ratio >= 0.50 && y_ratio <= 0.98;
+                    let is_on_pet = pet_renderer.body_hit_test(cursor_position.x, cursor_position.y).unwrap_or(false);
                     
                     if state == ElementState::Pressed {
-                        // Only allow drag if clicking directly on the enlarged pet body (cloud)
+                        // Only allow drag if clicking directly on the enlarged pet body (cloud/cat/octopus pixels)
                         if is_on_pet {
                             if let Err(e) = window_for_run.drag_window() {
                                 eprintln!("Failed to drag window: {:?}", e);
@@ -965,6 +962,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else if state == ElementState::Released {
                         // 拖拽窗口松手或点击松开瞬间触发受惊表情，持续 1.5 秒
                         surprised_timer = Some(std::time::Instant::now());
+                        pet_renderer.add_emotion(-0.02, 0.15);
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
@@ -987,16 +985,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let speed = (dx * dx + dy * dy).sqrt();
                         if speed > 220.0 {
                             surprised_timer = Some(std::time::Instant::now());
+                            pet_renderer.add_emotion(-0.08, 0.35);
                         }
                     }
                     last_mouse_phys_x = phys_x;
                     last_mouse_phys_y = phys_y;
 
-                    // Reactive behavior: Hover check (Touch the cloud)
-                    let size = window_for_run.inner_size();
-                    let x_ratio = cursor_position.x / size.width as f64;
-                    let y_ratio = cursor_position.y / size.height as f64;
-                    let is_on_pet = x_ratio >= 0.22 && x_ratio <= 0.78 && y_ratio >= 0.50 && y_ratio <= 0.98;
+                    // Reactive behavior: Hover check using pixel mask (Touch the cloud/cat/octopus)
+                    let is_on_pet = pet_renderer.body_hit_test(position.x, position.y).unwrap_or(false);
                     is_pointer_on_pet = is_on_pet;
                     
                     if is_on_pet && !was_pointer_on_pet {
@@ -1010,6 +1006,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if throttle && pet_renderer.pet_state != "thinking" {
                             last_hover_trigger_time = Some(now);
                             last_interactive_time = now;
+                            
+                            // Touch increases happiness and excitement
+                            pet_renderer.add_emotion(0.18, 0.08);
                             
                             // Blush and speak cute words
                             let blush_phrases = [
