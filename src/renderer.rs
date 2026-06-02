@@ -1058,14 +1058,17 @@ impl PetRenderer {
 
         // Viewport scale (48x48 up to width)
         let pet_width = if !self.draw_bubble_enabled {
-            self.pixmap.width() as f32 * 0.78
+            self.pixmap.width() as f32 * 0.80
         } else {
             self.pet_visual_size()
         };
         let pet_height = pet_width;
-        let pet_x = (self.pixmap.width() as f32 - pet_width) / 2.0;
         let view_scale = pet_width / 48.0;
-        let view_tx = pet_x + pet_width / 2.0;
+        let view_tx = if !self.draw_bubble_enabled {
+            self.pixmap.width() as f32 / 2.0 - 12.0 * view_scale
+        } else {
+            self.pixmap.width() as f32 / 2.0
+        };
         let view_ty = if !self.draw_bubble_enabled {
             self.pixmap.height() as f32 - 14.5 * view_scale
         } else {
