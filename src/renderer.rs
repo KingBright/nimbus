@@ -2360,23 +2360,38 @@ impl PetRenderer {
         blush_paint.set_color(Color::from_rgba8(255, 160, 175, blush_alpha));
         blush_paint.anti_alias = true;
 
-        if let Some(r) = Rect::from_xywh(
+        let build_blush_oval = |bx: f32, by: f32, bw: f32, bh: f32| -> Option<tiny_skia::Path> {
+            let mut pb = PathBuilder::new();
+            let cx = bx + bw / 2.0;
+            let cy = by + bh / 2.0;
+            let rx = bw / 2.0;
+            let ry = bh / 2.0;
+            let kx = rx * 0.55228475;
+            let ky = ry * 0.55228475;
+            pb.move_to(cx - rx, cy);
+            pb.cubic_to(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry);
+            pb.cubic_to(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy);
+            pb.cubic_to(cx + rx, cy + ky, cx + kx, cy + ry, cx, cy + ry);
+            pb.cubic_to(cx - kx, cy + ry, cx - rx, cy + ky, cx - rx, cy);
+            pb.close();
+            pb.finish()
+        };
+
+        if let Some(path) = build_blush_oval(
             style.blush_left_x,
             style.blush_y + blush_y_offset,
             style.blush_w,
             style.blush_h,
         ) {
-            let path = PathBuilder::from_rect(r);
             self.pixmap
                 .fill_path(&path, &blush_paint, FillRule::Winding, body_transform, None);
         }
-        if let Some(r) = Rect::from_xywh(
+        if let Some(path) = build_blush_oval(
             style.blush_right_x,
             style.blush_y + blush_y_offset,
             style.blush_w,
             style.blush_h,
         ) {
-            let path = PathBuilder::from_rect(r);
             self.pixmap
                 .fill_path(&path, &blush_paint, FillRule::Winding, body_transform, None);
         }
