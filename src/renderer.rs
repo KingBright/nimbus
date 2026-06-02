@@ -2493,8 +2493,9 @@ impl PetRenderer {
                     mouth_y + 0.1
                 };
                 let b_r = 0.95 * self.sleep_bubble_lerp * bubble_pulse;
-                if let Some(br) = Rect::from_xywh(b_cx - b_r, b_cy - b_r, b_r * 2.0, b_r * 2.0) {
-                    let bp = PathBuilder::from_rect(br);
+                let mut bp_builder = PathBuilder::new();
+                bp_builder.push_circle(b_cx, b_cy, b_r);
+                if let Some(bp) = bp_builder.finish() {
                     let mut b_paint = Paint::default();
                     b_paint.set_color(Color::from_rgba8(220, 240, 255, 140));
                     b_paint.anti_alias = true;
