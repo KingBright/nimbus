@@ -102,6 +102,7 @@ impl PetMemory {
         self.save();
     }
 
+    #[allow(dead_code)]
     pub fn increment_dreams(&mut self) {
         self.dream_count += 1;
         self.growth_points = self.growth_points.saturating_add(1);

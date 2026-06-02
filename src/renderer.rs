@@ -3,6 +3,9 @@ use tiny_skia::{
     Color, FillRule, LinearGradient, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform,
 };
 
+const BUBBLE_MAX_LOGICAL_W: f32 = 420.0;
+const BUBBLE_MIN_LOGICAL_W: f32 = 120.0;
+
 pub struct StyleConfig {
     pub name: &'static str,
     pub eye_base_w: f32,
@@ -274,12 +277,14 @@ impl PetRenderer {
                 self.body_mask = new_mask;
                 self.body_mask_ready = false;
             }
-            let wrap_w = width as f32 - 45.0 * self.scale_factor;
+            let wrap_w = width as f32 - self.bubble_horizontal_inset() * 2.0;
             self.text_buffer.set_size(
                 &mut self.font_system,
                 Some(wrap_w.max(100.0 * self.scale_factor)),
                 None,
             );
+            self.text_buffer
+                .shape_until_scroll(&mut self.font_system, false);
         }
     }
 
@@ -291,12 +296,17 @@ impl PetRenderer {
     }
 
     pub fn measure_bubble_size(&mut self) -> (f32, f32) {
+        let max_window_w = BUBBLE_MAX_LOGICAL_W * self.scale_factor;
+        let max_text_w =
+            (max_window_w - self.bubble_horizontal_inset() * 2.0).max(80.0 * self.scale_factor);
+        self.text_buffer
+            .set_size(&mut self.font_system, Some(max_text_w), None);
         self.text_buffer
             .shape_until_scroll(&mut self.font_system, false);
 
         let pad_x = 18.0 * self.scale_factor;
         let pad_top = 12.0 * self.scale_factor;
-        let pad_bottom = 9.0 * self.scale_factor;
+        let pad_bottom = 8.0 * self.scale_factor;
 
         let mut max_width = 0.0f32;
         let mut height = 0.0f32;
@@ -314,16 +324,33 @@ impl PetRenderer {
             return (0.0, 0.0);
         }
 
-        let tail_h = 5.0 * self.scale_factor;
-        let max_w_limit = self.pixmap.width() as f32;
-        let bubble_w = (max_width + pad_x * 2.0).clamp(
-            100.0 * self.scale_factor,
-            max_w_limit - 20.0 * self.scale_factor,
-        );
-        let visual_text_h = height.min(runs_to_draw as f32 * max_line_height * 0.88);
-        let bubble_h = visual_text_h + pad_top + pad_bottom + tail_h + 10.0 * self.scale_factor;
+        let tail_h = self.bubble_tail_height();
+        let safe_pad = self.bubble_edge_safe_pad();
+        let shadow_pad = self.bubble_shadow_pad();
+        let bubble_w = (max_width + pad_x * 2.0 + safe_pad * 2.0)
+            .clamp(BUBBLE_MIN_LOGICAL_W * self.scale_factor, max_window_w)
+            .ceil();
+        let visual_text_h = height.max(runs_to_draw as f32 * max_line_height);
+        let bubble_h =
+            (visual_text_h + pad_top + pad_bottom + tail_h + safe_pad * 2.0 + shadow_pad).ceil();
 
         (bubble_w, bubble_h)
+    }
+
+    fn bubble_horizontal_inset(&self) -> f32 {
+        18.0 * self.scale_factor + self.bubble_edge_safe_pad()
+    }
+
+    fn bubble_tail_height(&self) -> f32 {
+        8.0 * self.scale_factor
+    }
+
+    fn bubble_edge_safe_pad(&self) -> f32 {
+        3.0 * self.scale_factor
+    }
+
+    fn bubble_shadow_pad(&self) -> f32 {
+        5.0 * self.scale_factor
     }
 
     pub fn data(&self) -> &[u8] {
@@ -427,8 +454,10 @@ impl PetRenderer {
     fn draw_bubble(&mut self, pet_y: f32) {
         let pad_x = 18.0 * self.scale_factor;
         let pad_top = 12.0 * self.scale_factor;
-        let pad_bottom = 9.0 * self.scale_factor;
-        let tail_h = 5.0 * self.scale_factor;
+        let pad_bottom = 8.0 * self.scale_factor;
+        let tail_h = self.bubble_tail_height();
+        let safe_pad = self.bubble_edge_safe_pad();
+        let shadow_pad = self.bubble_shadow_pad();
         let mut max_width = 0.0f32;
 
         let max_w_limit = self.pixmap.width() as f32;
@@ -436,7 +465,7 @@ impl PetRenderer {
 
         let is_independent_bubble_window = !self.draw_pet_enabled;
 
-        let (bubble_w, bubble_h, x, y, runs_to_draw, visual_text_h, height) =
+        let (bubble_w, bubble_h, x, y, runs_to_draw, _visual_text_h, _height) =
             if is_independent_bubble_window {
                 let mut h = 0.0f32;
                 let mut max_lh = 0.0f32;
@@ -450,25 +479,22 @@ impl PetRenderer {
                 if runs == 0 {
                     return;
                 }
-                let bw = max_w_limit;
-                let bh = max_h_limit - tail_h;
-                let bx = 0.0f32;
+                let bw = (max_w_limit - safe_pad * 2.0).max(1.0);
+                let bh = (max_h_limit - tail_h - safe_pad * 2.0 - shadow_pad).max(1.0);
+                let bx = safe_pad;
                 let by = if self.bubble_on_bottom {
-                    tail_h
+                    safe_pad + tail_h
                 } else {
-                    0.0f32
+                    safe_pad
                 };
-                let v_text_h = h.min(runs as f32 * max_lh * 0.88);
+                let v_text_h = h.max(runs as f32 * max_lh);
                 (bw, bh, bx, by, runs, v_text_h, h)
             } else {
                 // Max bubble height from padding to pet boundaries
                 let max_bubble_h = if self.bubble_on_bottom {
-                    let max_h = (max_h_limit - pet_y - 25.0 * self.scale_factor)
-                        .max(50.0 * self.scale_factor);
-                    max_h
+                    (max_h_limit - pet_y - 25.0 * self.scale_factor).max(50.0 * self.scale_factor)
                 } else {
-                    let max_h = (pet_y - 25.0 * self.scale_factor).max(50.0 * self.scale_factor);
-                    max_h
+                    (pet_y - 25.0 * self.scale_factor).max(50.0 * self.scale_factor)
                 };
                 let max_text_h = max_bubble_h - pad_top - pad_bottom - tail_h;
 
@@ -494,7 +520,7 @@ impl PetRenderer {
                     100.0 * self.scale_factor,
                     max_w_limit - 20.0 * self.scale_factor,
                 );
-                let v_text_h = h.min(runs as f32 * max_lh * 0.88);
+                let v_text_h = h.max(runs as f32 * max_lh);
                 let bh = v_text_h + pad_top + pad_bottom;
 
                 let bx = (max_w_limit - bw) / 2.0;
@@ -535,34 +561,44 @@ impl PetRenderer {
         let mut tail_pb = PathBuilder::new();
         if self.bubble_on_bottom {
             // Tail pointing upwards (at top of bubble)
+            let apex_y = if is_independent_bubble_window {
+                safe_pad
+            } else {
+                y - tail_h
+            };
             tail_pb.move_to(cx - 5.5 * self.scale_factor, y + 0.35 * self.scale_factor);
             tail_pb.quad_to(
                 cx - 1.9 * self.scale_factor,
-                y - tail_h * 0.66,
+                apex_y + tail_h * 0.34,
                 cx,
-                y - tail_h,
+                apex_y,
             );
             tail_pb.quad_to(
                 cx + 1.9 * self.scale_factor,
-                y - tail_h * 0.66,
+                apex_y + tail_h * 0.34,
                 cx + 5.5 * self.scale_factor,
                 y + 0.35 * self.scale_factor,
             );
         } else {
             // Tail pointing downwards (at bottom of bubble)
+            let apex_y = if is_independent_bubble_window {
+                max_h_limit - safe_pad - shadow_pad
+            } else {
+                y + bubble_h + tail_h
+            };
             tail_pb.move_to(
                 cx - 5.5 * self.scale_factor,
                 y + bubble_h - 0.35 * self.scale_factor,
             );
             tail_pb.quad_to(
                 cx - 1.9 * self.scale_factor,
-                y + bubble_h + tail_h * 0.66,
+                apex_y - tail_h * 0.34,
                 cx,
-                y + bubble_h + tail_h,
+                apex_y,
             );
             tail_pb.quad_to(
                 cx + 1.9 * self.scale_factor,
-                y + bubble_h + tail_h * 0.66,
+                apex_y - tail_h * 0.34,
                 cx + 5.5 * self.scale_factor,
                 y + bubble_h - 0.35 * self.scale_factor,
             );
@@ -596,7 +632,7 @@ impl PetRenderer {
         let mut shadow_paint = Paint::default();
         shadow_paint.set_color(Color::from_rgba8(40, 50, 100, 18));
         shadow_paint.anti_alias = true;
-        let shadow_transform = Transform::from_translate(0.0, 4.0 * self.scale_factor);
+        let shadow_transform = Transform::from_translate(0.0, 3.0 * self.scale_factor);
         self.pixmap.fill_path(
             &path,
             &shadow_paint,
@@ -633,7 +669,7 @@ impl PetRenderer {
 
         // 2. Draw text using cosmic-text SwashCache
         let text_color = CosmicColor::rgb(0x2d, 0x37, 0x48);
-        let vertical_nudge = (visual_text_h - height).min(0.0) * 0.35 + 1.5 * self.scale_factor;
+        let vertical_nudge = 0.0;
         for run in self.text_buffer.layout_runs().take(runs_to_draw) {
             let line_y = y + pad_top + vertical_nudge + run.line_y;
             for glyph in run.glyphs {
@@ -1021,12 +1057,20 @@ impl PetRenderer {
         let eye_ty = idle_eye_y * self.gaze_active_lerp;
 
         // Viewport scale (48x48 up to width)
-        let pet_width = self.pet_visual_size();
+        let pet_width = if !self.draw_bubble_enabled {
+            self.pixmap.width() as f32 * 0.92
+        } else {
+            self.pet_visual_size()
+        };
         let pet_height = pet_width;
         let pet_x = (self.pixmap.width() as f32 - pet_width) / 2.0;
         let view_scale = pet_width / 48.0;
         let view_tx = pet_x + pet_width / 2.0;
-        let view_ty = pet_y + pet_height / 2.0;
+        let view_ty = if !self.draw_bubble_enabled {
+            self.pixmap.height() as f32 - 12.0 * view_scale
+        } else {
+            pet_y + pet_height / 2.0
+        };
 
         let base_transform = Transform::from_translate(view_tx, view_ty)
             .pre_scale(view_scale, view_scale)
@@ -1476,7 +1520,7 @@ impl PetRenderer {
         if style.name == "starlit" {
             // Draw 6 Chubby-and-Curved Soft Tentacles (粗壮微卷软体触手)
             let tentacle_x_anchors = [9.0, 14.0, 19.0, 29.0, 34.0, 39.0];
-            for i in 0..6 {
+            for (i, &x_anchor) in tentacle_x_anchors.iter().enumerate() {
                 let idx = i as f32;
                 let phase = idx * 1.35 + (idx * 2.1).cos() * 0.6;
                 let speed_factor = 2.2 + (idx * 1.6).sin().abs() * 1.0;
@@ -1485,7 +1529,6 @@ impl PetRenderer {
                     ((tentacle_t).sin() * 1.6 + (tentacle_t * 0.55).cos() * 0.35) * anim_amplitude;
                 let wave_y = ((tentacle_t + 1.15).cos() * 0.8) * anim_amplitude;
 
-                let x_anchor = tentacle_x_anchors[i];
                 let mut leg_pb = PathBuilder::new();
                 leg_pb.move_to(x_anchor, 16.5);
 
@@ -1746,7 +1789,7 @@ impl PetRenderer {
                 let bubble_cycle2 = (t * 1.5 + 2.0) % 4.0;
                 let scale2 = bubble_cycle2 / 4.0;
                 let bubble_y2 = 15.0 - bubble_cycle2 * 2.3;
-                let bubble_x2 = 35.0 + (t * 3.5 + 3.14).sin() * 0.9;
+                let bubble_x2 = 35.0 + (t * 3.5 + std::f32::consts::PI).sin() * 0.9;
                 let r2 = 0.50 * (1.1 - scale2);
                 if r2 > 0.05 {
                     let mut b2 = PathBuilder::new();
@@ -1971,28 +2014,29 @@ impl PetRenderer {
             );
             l_claw_outer.close();
 
-            for path in &[l_claw_inner.finish(), l_claw_outer.finish()] {
-                if let Some(ref p) = path {
-                    let mut claw_paint = Paint::default();
-                    claw_paint.set_color(Color::from_rgba8(255, 75, 60, 255));
-                    claw_paint.anti_alias = true;
-                    self.pixmap
-                        .fill_path(p, &claw_paint, FillRule::Winding, body_transform, None);
+            for p in [l_claw_inner.finish(), l_claw_outer.finish()]
+                .into_iter()
+                .flatten()
+            {
+                let mut claw_paint = Paint::default();
+                claw_paint.set_color(Color::from_rgba8(255, 75, 60, 255));
+                claw_paint.anti_alias = true;
+                self.pixmap
+                    .fill_path(&p, &claw_paint, FillRule::Winding, body_transform, None);
 
-                    let mut stroke = Paint::default();
-                    stroke.set_color(style.outer_rim_color);
-                    stroke.anti_alias = true;
-                    self.pixmap.stroke_path(
-                        p,
-                        &stroke,
-                        &Stroke {
-                            width: 0.5,
-                            ..Default::default()
-                        },
-                        body_transform,
-                        None,
-                    );
-                }
+                let mut stroke = Paint::default();
+                stroke.set_color(style.outer_rim_color);
+                stroke.anti_alias = true;
+                self.pixmap.stroke_path(
+                    &p,
+                    &stroke,
+                    &Stroke {
+                        width: 0.5,
+                        ..Default::default()
+                    },
+                    body_transform,
+                    None,
+                );
             }
 
             // 右大螯臂
@@ -2075,28 +2119,29 @@ impl PetRenderer {
             );
             r_claw_outer.close();
 
-            for path in &[r_claw_inner.finish(), r_claw_outer.finish()] {
-                if let Some(ref p) = path {
-                    let mut claw_paint = Paint::default();
-                    claw_paint.set_color(Color::from_rgba8(255, 75, 60, 255));
-                    claw_paint.anti_alias = true;
-                    self.pixmap
-                        .fill_path(p, &claw_paint, FillRule::Winding, body_transform, None);
+            for p in [r_claw_inner.finish(), r_claw_outer.finish()]
+                .into_iter()
+                .flatten()
+            {
+                let mut claw_paint = Paint::default();
+                claw_paint.set_color(Color::from_rgba8(255, 75, 60, 255));
+                claw_paint.anti_alias = true;
+                self.pixmap
+                    .fill_path(&p, &claw_paint, FillRule::Winding, body_transform, None);
 
-                    let mut stroke = Paint::default();
-                    stroke.set_color(style.outer_rim_color);
-                    stroke.anti_alias = true;
-                    self.pixmap.stroke_path(
-                        p,
-                        &stroke,
-                        &Stroke {
-                            width: 0.5,
-                            ..Default::default()
-                        },
-                        body_transform,
-                        None,
-                    );
-                }
+                let mut stroke = Paint::default();
+                stroke.set_color(style.outer_rim_color);
+                stroke.anti_alias = true;
+                self.pixmap.stroke_path(
+                    &p,
+                    &stroke,
+                    &Stroke {
+                        width: 0.5,
+                        ..Default::default()
+                    },
+                    body_transform,
+                    None,
+                );
             }
         }
 
@@ -3253,6 +3298,55 @@ fn rand_offset() -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn alpha_at(renderer: &PetRenderer, x: u32, y: u32) -> u8 {
+        let idx = ((y * renderer.pixmap.width() + x) * 4 + 3) as usize;
+        renderer.pixmap.data()[idx]
+    }
+
+    #[test]
+    fn bubble_measure_can_expand_after_small_window() {
+        let mut renderer = PetRenderer::new(120, 120);
+        renderer.draw_pet_enabled = false;
+        renderer.draw_bubble_enabled = true;
+        renderer.scale_factor = 2.0;
+        renderer.set_font_size(22.0);
+        renderer.set_text("我醒来啦，先把屏幕边缘的小光点整理好。");
+
+        let (w, h) = renderer.measure_bubble_size();
+
+        assert!(w > 120.0);
+        assert!(w <= BUBBLE_MAX_LOGICAL_W * renderer.scale_factor);
+        assert!(h > 50.0);
+    }
+
+    #[test]
+    fn independent_bubble_tail_stays_inside_pixmap() {
+        let mut renderer = PetRenderer::new(320, 120);
+        renderer.draw_pet_enabled = false;
+        renderer.draw_bubble_enabled = true;
+        renderer.set_text("轻轻醒来，屏幕还亮着");
+
+        let (w, h) = renderer.measure_bubble_size();
+        renderer.resize(w as u32, h as u32);
+
+        renderer.bubble_on_bottom = true;
+        renderer.update_and_draw();
+        let top_tail_alpha = alpha_at(
+            &renderer,
+            renderer.pixmap.width() / 2,
+            renderer.bubble_edge_safe_pad().ceil() as u32,
+        );
+        assert!(top_tail_alpha > 0);
+
+        renderer.bubble_on_bottom = false;
+        renderer.update_and_draw();
+        let bottom_tail_y = renderer.pixmap.height().saturating_sub(
+            (renderer.bubble_edge_safe_pad() + renderer.bubble_shadow_pad()).ceil() as u32,
+        );
+        let bottom_tail_alpha = alpha_at(&renderer, renderer.pixmap.width() / 2, bottom_tail_y);
+        assert!(bottom_tail_alpha > 0);
+    }
 
     #[test]
     fn body_hit_test_uses_rendered_cloud_mask() {
