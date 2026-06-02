@@ -1117,11 +1117,7 @@ impl PetRenderer {
                 pb.quad_to(43.0, 18.0, 42.0, 20.0);
                 pb.quad_to(41.5, 21.5, 39.5, 21.5);
 
-                // 底部腹部到前脸下方双脚爪
-                pb.line_to(16.0, 21.5);
-                pb.cubic_to(15.5, 22.8, 14.0, 22.8, 13.5, 21.5); // 右爪
-                pb.line_to(12.5, 21.5);
-                pb.cubic_to(12.0, 22.8, 10.5, 22.8, 10.0, 21.5); // 左爪
+                // 底部腹部
                 pb.line_to(8.0, 21.5);
                 pb.close();
             }
@@ -1305,6 +1301,68 @@ impl PetRenderer {
 
         // --- Render style-specific accessories / decor ---
         if style.name == "mochi" {
+            // Draw Dynamic Paw Kneading (前爪交替踩奶动效)
+            let paw_speed = match self.pet_state.as_str() {
+                "sleeping" => 1.8,
+                "tickled" => 8.0,
+                "surprised" => 0.0,
+                _ => 3.5,
+            };
+            let paw_amp = match self.pet_state.as_str() {
+                "sleeping" => 0.06,
+                "tickled" => 0.65,
+                "surprised" => 0.0,
+                _ => 0.28,
+            };
+
+            let paw_l_dy = (anim_t * paw_speed).sin() * paw_amp * anim_amplitude;
+            let paw_r_dy = (anim_t * paw_speed + std::f32::consts::PI).sin() * paw_amp * anim_amplitude;
+
+            let paw_l_transform = body_transform.pre_translate(0.0, paw_l_dy);
+            let paw_r_transform = body_transform.pre_translate(0.0, paw_r_dy);
+
+            let mut paw_fill_paint = Paint::default();
+            paw_fill_paint.set_color(Color::from_rgba8(195, 235, 210, 255)); // 抹茶绿底部浅色
+            paw_fill_paint.anti_alias = true;
+
+            let mut paw_stroke_paint = Paint::default();
+            paw_stroke_paint.set_color(style.outer_rim_color);
+            paw_stroke_paint.anti_alias = true;
+            let paw_stroke = Stroke {
+                width: 0.82,
+                ..Default::default()
+            };
+
+            // 1. 左前爪 (x 范围约 8.2 到 12.2)
+            let mut left_fill_pb = PathBuilder::new();
+            left_fill_pb.move_to(8.2, 21.0);
+            left_fill_pb.cubic_to(8.2, 24.2, 12.2, 24.2, 12.2, 21.0);
+            left_fill_pb.close();
+
+            let mut left_stroke_pb = PathBuilder::new();
+            left_stroke_pb.move_to(8.2, 21.0);
+            left_stroke_pb.cubic_to(8.2, 24.2, 12.2, 24.2, 12.2, 21.0);
+
+            if let (Some(fp), Some(sp)) = (left_fill_pb.finish(), left_stroke_pb.finish()) {
+                self.pixmap.fill_path(&fp, &paw_fill_paint, FillRule::Winding, paw_l_transform, None);
+                self.pixmap.stroke_path(&sp, &paw_stroke_paint, &paw_stroke, paw_l_transform, None);
+            }
+
+            // 2. 右前爪 (x 范围约 13.5 到 17.5)
+            let mut right_fill_pb = PathBuilder::new();
+            right_fill_pb.move_to(13.5, 21.0);
+            right_fill_pb.cubic_to(13.5, 24.2, 17.5, 24.2, 17.5, 21.0);
+            right_fill_pb.close();
+
+            let mut right_stroke_pb = PathBuilder::new();
+            right_stroke_pb.move_to(13.5, 21.0);
+            right_stroke_pb.cubic_to(13.5, 24.2, 17.5, 24.2, 17.5, 21.0);
+
+            if let (Some(fp), Some(sp)) = (right_fill_pb.finish(), right_stroke_pb.finish()) {
+                self.pixmap.fill_path(&fp, &paw_fill_paint, FillRule::Winding, paw_r_transform, None);
+                self.pixmap.stroke_path(&sp, &paw_stroke_paint, &paw_stroke, paw_r_transform, None);
+            }
+
             // Draw Cat Inner Ears (粉嫩内耳廓，适配立耳位置)
             // Left Inner Ear
             let mut inner_l_pb = PathBuilder::new();
@@ -1715,6 +1773,184 @@ impl PetRenderer {
                         &core_path,
                         &core_paint,
                         FillRule::Winding,
+                        body_transform,
+                        None,
+                    );
+                }
+            }
+
+            // 2. Draw Floating Starry Crown (星光金皇冠，随呼吸上下差向漂浮)
+            let crown_dy = -breath_wave * 0.18;
+            let crown_transform = body_transform.pre_translate(0.0, crown_dy);
+
+            let mut crown_pb = PathBuilder::new();
+            crown_pb.move_to(20.0, 3.8);
+            crown_pb.line_to(20.0, 1.8);
+            crown_pb.line_to(22.0, 2.8);
+            crown_pb.line_to(24.0, 0.8); // 皇冠中尖
+            crown_pb.line_to(26.0, 2.8);
+            crown_pb.line_to(28.0, 1.8);
+            crown_pb.line_to(28.0, 3.8);
+            crown_pb.close();
+
+            if let Some(cp) = crown_pb.finish() {
+                let crown_stops = vec![
+                    tiny_skia::GradientStop::new(0.0, Color::from_rgba8(255, 235, 120, 255)),
+                    tiny_skia::GradientStop::new(1.0, Color::from_rgba8(255, 170, 40, 255)),
+                ];
+                if let Some(crown_grad) = LinearGradient::new(
+                    tiny_skia::Point::from_xy(24.0, 0.8),
+                    tiny_skia::Point::from_xy(24.0, 3.8),
+                    crown_stops,
+                    tiny_skia::SpreadMode::Pad,
+                    Transform::identity(),
+                ) {
+                    let crown_paint = Paint {
+                        shader: crown_grad,
+                        anti_alias: true,
+                        ..Default::default()
+                    };
+                    self.pixmap.fill_path(&cp, &crown_paint, FillRule::Winding, crown_transform, None);
+
+                    let mut crown_stroke_paint = Paint::default();
+                    crown_stroke_paint.set_color(Color::from_rgba8(200, 80, 20, 220)); // 橘红细边
+                    crown_stroke_paint.anti_alias = true;
+                    self.pixmap.stroke_path(
+                        &cp,
+                        &crown_stroke_paint,
+                        &Stroke {
+                            width: 0.42,
+                            ..Default::default()
+                        },
+                        crown_transform,
+                        None,
+                    );
+                }
+            }
+
+            // 绘制皇冠顶端的 3 颗微缩星光珍珠
+            let pearl_color = Color::from_rgba8(255, 255, 255, 245);
+            let mut pearl_paint = Paint::default();
+            pearl_paint.set_color(pearl_color);
+            pearl_paint.anti_alias = true;
+            let pearl_r = 0.45f32;
+            for &(px, py) in &[(20.0f32, 1.8f32), (24.0f32, 0.8f32), (28.0f32, 1.8f32)] {
+                if let Some(pr) = Rect::from_xywh(px - pearl_r, py - pearl_r, pearl_r * 2.0, pearl_r * 2.0) {
+                    let pp = PathBuilder::from_rect(pr);
+                    self.pixmap.fill_path(&pp, &pearl_paint, FillRule::Winding, crown_transform, None);
+                }
+            }
+
+            // 3. Draw Cosmic Dust Particles (宇宙星尘闪烁小四角星)
+            let star_fade_l = (t * 2.2).sin().abs() * 0.82 + 0.18;
+            let star_fade_r = (t * 2.2 + std::f32::consts::FRAC_PI_2).sin().abs() * 0.82 + 0.18;
+
+            let star_dy_l = (t * 1.6).cos() * 0.50;
+            let star_dy_r = (t * 1.6 + 1.3).sin() * 0.50;
+
+            let build_four_star = |cx: f32, cy: f32, r: f32| -> Option<tiny_skia::Path> {
+                let mut pb = PathBuilder::new();
+                pb.move_to(cx, cy - r);
+                pb.quad_to(cx, cy, cx + r, cy);
+                pb.quad_to(cx, cy, cx, cy + r);
+                pb.quad_to(cx, cy, cx - r, cy);
+                pb.quad_to(cx, cy, cx, cy - r);
+                pb.close();
+                pb.finish()
+            };
+
+            // 左侧星 (x=6.5, y=9.5)
+            if let Some(sp_l) = build_four_star(6.5, 9.5 + star_dy_l, 1.25) {
+                let mut p_paint = Paint::default();
+                p_paint.set_color(Color::from_rgba8(255, 255, 255, (255.0 * star_fade_l) as u8));
+                p_paint.anti_alias = true;
+                self.pixmap.fill_path(&sp_l, &p_paint, FillRule::Winding, body_transform, None);
+            }
+            // 右侧星 (x=41.5, y=12.5)
+            if let Some(sp_r) = build_four_star(41.5, 12.5 + star_dy_r, 1.25) {
+                let mut p_paint = Paint::default();
+                p_paint.set_color(Color::from_rgba8(255, 255, 255, (255.0 * star_fade_r) as u8));
+                p_paint.anti_alias = true;
+                self.pixmap.fill_path(&sp_r, &p_paint, FillRule::Winding, body_transform, None);
+            }
+        }
+
+        if style.name == "nimbus" {
+            // 1. Draw Falling Raindrops (淅淅沥沥下落的小雨滴)
+            let build_drop_path = |cx: f32, cy: f32, r: f32| -> Option<tiny_skia::Path> {
+                let mut pb = PathBuilder::new();
+                pb.move_to(cx, cy - r * 1.4);
+                pb.cubic_to(cx + r, cy - r * 0.5, cx + r, cy + r, cx, cy + r);
+                pb.cubic_to(cx - r, cy + r, cx - r, cy - r * 0.5, cx, cy - r * 1.4);
+                pb.close();
+                pb.finish()
+            };
+
+            let drop_y_start = 23.0f32;
+            let drop_y_end = 30.5f32;
+            let drop_range = drop_y_end - drop_y_start;
+
+            for i in 0..2 {
+                let phase_offset = if i == 0 { 0.0f32 } else { 0.5f32 };
+                let drop_t = (t * 1.4 + phase_offset) % 1.0;
+                let fade = 1.0 - drop_t;
+
+                let drop_x = if i == 0 { 16.0f32 } else { 32.0f32 } + (t * 2.2 + i as f32 * 1.8).sin() * 0.40;
+                let drop_y = drop_y_start + drop_t * drop_range;
+                let drop_r = 0.52 * fade;
+
+                if let Some(dp) = build_drop_path(drop_x, drop_y, drop_r) {
+                    let mut d_paint = Paint::default();
+                    d_paint.set_color(Color::from_rgba8(130, 195, 255, (160.0 * fade) as u8));
+                    d_paint.anti_alias = true;
+                    self.pixmap.fill_path(&dp, &d_paint, FillRule::Winding, body_transform, None);
+
+                    let mut d_stroke_paint = Paint::default();
+                    d_stroke_paint.set_color(Color::from_rgba8(255, 255, 255, (170.0 * fade) as u8));
+                    d_stroke_paint.anti_alias = true;
+                    self.pixmap.stroke_path(
+                        &dp,
+                        &d_stroke_paint,
+                        &Stroke {
+                            width: 0.22,
+                            ..Default::default()
+                        },
+                        body_transform,
+                        None,
+                    );
+                }
+            }
+
+            // 2. Draw Emotion Lightning (在 surprised 或 thinking 状态下高频闪烁黄色迷你雷电)
+            let show_lightning = match self.pet_state.as_str() {
+                "surprised" => (t * 22.0).cos() > 0.15,
+                "thinking" => (t * 12.0).cos() > 0.45,
+                _ => false,
+            };
+
+            if show_lightning {
+                let mut bolt_pb = PathBuilder::new();
+                bolt_pb.move_to(22.5, 22.8);
+                bolt_pb.line_to(20.2, 26.5);
+                bolt_pb.line_to(23.2, 26.5);
+                bolt_pb.line_to(21.2, 30.5);
+
+                if let Some(bp) = bolt_pb.finish() {
+                    let mut bolt_paint = Paint::default();
+                    bolt_paint.set_color(Color::from_rgba8(255, 230, 30, 245));
+                    bolt_paint.anti_alias = true;
+                    self.pixmap.fill_path(&bp, &bolt_paint, FillRule::Winding, body_transform, None);
+
+                    let mut bolt_stroke_paint = Paint::default();
+                    bolt_stroke_paint.set_color(Color::from_rgba8(220, 110, 10, 240));
+                    bolt_stroke_paint.anti_alias = true;
+                    self.pixmap.stroke_path(
+                        &bp,
+                        &bolt_stroke_paint,
+                        &Stroke {
+                            width: 0.45,
+                            ..Default::default()
+                        },
                         body_transform,
                         None,
                     );
