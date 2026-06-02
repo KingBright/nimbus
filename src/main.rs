@@ -1,24 +1,24 @@
+use futures_util::StreamExt;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use winit::{
-    event::{Event, WindowEvent, ElementState, MouseButton},
+    event::{ElementState, Event, MouseButton, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::WindowBuilder,
 };
-use futures_util::StreamExt;
 
 mod config;
-mod memory;
-mod think_filter;
 mod llama_engine;
+mod memory;
 mod renderer;
+mod think_filter;
 
 use config::AppConfig;
 use llama_engine::LlamaEngine;
 use memory::PetMemory;
 use renderer::PetRenderer;
 use tray_icon::{
-    menu::{Menu, MenuItem, Submenu, PredefinedMenuItem, CheckMenuItem, MenuEvent},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
     TrayIconBuilder,
 };
 
@@ -37,39 +37,59 @@ struct WgpuState {
 }
 
 impl WgpuState {
-    async fn new(window: Arc<winit::window::Window>, width: u32, height: u32) -> Result<Self, Box<dyn std::error::Error>> {
+    async fn new(
+        window: Arc<winit::window::Window>,
+        _width: u32,
+        _height: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let size = window.inner_size();
+        let width = size.width.max(1);
+        let height = size.height.max(1);
+
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
-        
+
         let surface = instance.create_surface(window.clone())?;
-        
-        let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }).await.ok_or("Failed to find an appropriate adapter")?;
-        
-        let (device, queue) = adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-            },
-            None,
-        ).await?;
-        
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .ok_or("Failed to find an appropriate adapter")?;
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: None,
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                },
+                None,
+            )
+            .await?;
+
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats.iter()
+        let surface_format = surface_caps
+            .formats
+            .iter()
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
-            
-        let alpha_mode = if surface_caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+
+        let alpha_mode = if surface_caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
             wgpu::CompositeAlphaMode::PreMultiplied
-        } else if surface_caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+        } else if surface_caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+        {
             wgpu::CompositeAlphaMode::PostMultiplied
         } else {
             wgpu::CompositeAlphaMode::Opaque
@@ -78,15 +98,15 @@ impl WgpuState {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width,
+            height,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
-        
+
         let texture_desc = wgpu::TextureDescriptor {
             size: wgpu::Extent3d {
                 width,
@@ -103,7 +123,7 @@ impl WgpuState {
         };
         let texture = device.create_texture(&texture_desc);
         let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
@@ -111,10 +131,11 @@ impl WgpuState {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        
+
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(r#"
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
                 struct VertexOutput {
                     @builtin(position) clip_position: vec4<f32>,
                     @location(0) tex_coords: vec2<f32>,
@@ -154,9 +175,10 @@ impl WgpuState {
                 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                     return textureSample(t_diffuse, s_diffuse, in.tex_coords);
                 }
-            "#)),
+            "#,
+            )),
         });
-        
+
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -178,7 +200,7 @@ impl WgpuState {
             ],
             label: Some("texture_bind_group_layout"),
         });
-        
+
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout: &bind_group_layout,
             entries: &[
@@ -193,13 +215,14 @@ impl WgpuState {
             ],
             label: Some("texture_bind_group"),
         });
-        
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        
+
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[&bind_group_layout],
+                push_constant_ranges: &[],
+            });
+
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render Pipeline"),
             layout: Some(&render_pipeline_layout),
@@ -241,7 +264,7 @@ impl WgpuState {
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
         });
-        
+
         Ok(Self {
             surface,
             device,
@@ -256,15 +279,77 @@ impl WgpuState {
             height,
         })
     }
-    
+
     fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
+        if width > 0 && height > 0 && (self.width != width || self.height != height) {
+            self.width = width;
+            self.height = height;
             self.config.width = width;
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
+
+            let texture_desc = wgpu::TextureDescriptor {
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                label: Some("Skia Texture"),
+                view_formats: &[],
+            };
+            self.texture = self.device.create_texture(&texture_desc);
+            self.texture_view = self
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+
+            let bind_group_layout =
+                self.device
+                    .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        entries: &[
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 0,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Texture {
+                                    multisampled: false,
+                                    view_dimension: wgpu::TextureViewDimension::D2,
+                                    sample_type: wgpu::TextureSampleType::Float {
+                                        filterable: true,
+                                    },
+                                },
+                                count: None,
+                            },
+                            wgpu::BindGroupLayoutEntry {
+                                binding: 1,
+                                visibility: wgpu::ShaderStages::FRAGMENT,
+                                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                                count: None,
+                            },
+                        ],
+                        label: Some("texture_bind_group_layout"),
+                    });
+
+            self.bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+                label: Some("texture_bind_group"),
+            });
         }
     }
-    
+
     fn render(&self, skia_data: &[u8]) -> Result<(), wgpu::SurfaceError> {
         self.queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -285,14 +370,18 @@ impl WgpuState {
                 depth_or_array_layers: 1,
             },
         );
-        
+
         let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
-        
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
+
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
@@ -308,15 +397,15 @@ impl WgpuState {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            
+
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.bind_group, &[]);
             render_pass.draw(0..6, 0..1);
         }
-        
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-        
+
         Ok(())
     }
 }
@@ -336,7 +425,8 @@ async fn observe_user_activity() -> (String, u32) {
             let combined = String::from_utf8_lossy(&out.stdout).to_string();
             let mut lines = combined.lines();
             let app_name = lines.next().unwrap_or("未知应用").trim().to_string();
-            let hour = lines.next()
+            let hour = lines
+                .next()
                 .unwrap_or("12")
                 .trim()
                 .parse::<u32>()
@@ -361,18 +451,32 @@ fn get_offline_mutter(app: &str, hour: u32) -> String {
     if hour >= 23 || hour <= 5 {
         return "夜深啦，小云朵已经有点困了，主人也要早点休息哦 (￣o￣).zZ".to_string();
     }
-    
+
     let app_lower = app.to_lowercase();
-    if app_lower.contains("code") || app_lower.contains("terminal") || app_lower.contains("xcode") || app_lower.contains("cargo") || app_lower.contains("idea") {
+    if app_lower.contains("code")
+        || app_lower.contains("terminal")
+        || app_lower.contains("xcode")
+        || app_lower.contains("cargo")
+        || app_lower.contains("idea")
+    {
         return "主人一直在认真写代码呢，小云朵在陪着你，喝杯温水歇歇吧~".to_string();
     }
-    if app_lower.contains("safari") || app_lower.contains("chrome") || app_lower.contains("firefox") || app_lower.contains("browser") {
+    if app_lower.contains("safari")
+        || app_lower.contains("chrome")
+        || app_lower.contains("firefox")
+        || app_lower.contains("browser")
+    {
         return "网页刷个不停，小云朵帮你吹吹风，歇一会眼睛吧~".to_string();
     }
-    if app_lower.contains("chat") || app_lower.contains("wechat") || app_lower.contains("slack") || app_lower.contains("discord") || app_lower.contains("ding") {
+    if app_lower.contains("chat")
+        || app_lower.contains("wechat")
+        || app_lower.contains("slack")
+        || app_lower.contains("discord")
+        || app_lower.contains("ding")
+    {
         return "在和谁聊天呢？小云朵也想加入，嘿嘿~".to_string();
     }
-    
+
     let generic = [
         "云朵今天也想飞得更高呢~",
         "主人敲代码累了吗？云朵帮你捏捏肩（虽然没有手）~",
@@ -380,9 +484,9 @@ fn get_offline_mutter(app: &str, hour: u32) -> String {
         "云朵在空气中漂浮着，呼呼...",
         "又是和主人在一起的一天，真开心！",
         "主人加油！你是最棒的！(*^▽^*)",
-        "小云朵打了个滚，变成了一片甜甜的棉花糖~"
+        "小云朵打了个滚，变成了一片甜甜的棉花糖~",
     ];
-    
+
     let idx = get_pseudo_random_index(generic.len());
     generic[idx].to_string()
 }
@@ -395,12 +499,12 @@ fn create_tray_icon() -> tray_icon::Icon {
             // Draw a cute cloud shape
             let dx = x as f32 - 8.0;
             let dy = y as f32 - 8.0;
-            let dist = (dx*dx + dy*dy).sqrt();
+            let dist = (dx * dx + dy * dy).sqrt();
             if dist < 5.0 || (y >= 7 && y <= 11 && x >= 3 && x <= 13) {
                 rgba[idx] = 135;
-                rgba[idx+1] = 206;
-                rgba[idx+2] = 250;
-                rgba[idx+3] = 255;
+                rgba[idx + 1] = 206;
+                rgba[idx + 2] = 250;
+                rgba[idx + 3] = 255;
             }
         }
     }
@@ -455,44 +559,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Load config
     let mut config = AppConfig::load_or_create();
-    
+
     // 1.5 Load memory diary
     let memory = Arc::new(std::sync::Mutex::new(PetMemory::load_or_create()));
-    
+
     // 2. Setup Winit Event Loop (must initialize before tray-icon on macOS)
     let event_loop = EventLoop::new()?;
-    
+
     // Build System Tray
     let _tray_icon = {
         let menu = Menu::new();
-        
-        let mutter_check = CheckMenuItem::with_id("mutter_enabled", "开启自言自语", true, config.mutter_enabled, None);
+
+        let mutter_check = CheckMenuItem::with_id(
+            "mutter_enabled",
+            "开启自言自语",
+            true,
+            config.mutter_enabled,
+            None,
+        );
         menu.append(&mutter_check).unwrap();
-        
+
         let persona_submenu = Submenu::with_id("persona", "切换桌宠人设", true);
         let p_default = MenuItem::with_id("persona_default", "软萌活泼 (默认)", true, None);
         let p_tsundere = MenuItem::with_id("persona_tsundere", "傲娇嘴硬", true, None);
         let p_toxic = MenuItem::with_id("persona_toxic", "冷酷毒舌", true, None);
         let p_moe = MenuItem::with_id("persona_moe", "极度粘人", true, None);
-        persona_submenu.append_items(&[&p_default, &p_tsundere, &p_toxic, &p_moe]).unwrap();
+        persona_submenu
+            .append_items(&[&p_default, &p_tsundere, &p_toxic, &p_moe])
+            .unwrap();
         menu.append(&persona_submenu).unwrap();
-        
+
+        let style_submenu = Submenu::with_id("pet_style", "切换桌宠外观", true);
+        let s_nimbus = MenuItem::with_id("style_nimbus", "粉蓝小云朵 (Nimbus)", true, None);
+        let s_mochi = MenuItem::with_id("style_mochi", "抹茶猫咪麻薯 (Mochi)", true, None);
+        let s_starlit = MenuItem::with_id("style_starlit", "太空章鱼 (Starlit)", true, None);
+        let s_crab = MenuItem::with_id("style_crab", "红螯小螃蟹 (Crab)", true, None);
+        style_submenu
+            .append_items(&[&s_nimbus, &s_mochi, &s_starlit, &s_crab])
+            .unwrap();
+        menu.append(&style_submenu).unwrap();
+
         let font_submenu = Submenu::with_id("font_size", "调整字号大小", true);
         let f_20 = MenuItem::with_id("font_20", "20 像素", true, None);
         let f_24 = MenuItem::with_id("font_24", "24 像素 (默认)", true, None);
         let f_28 = MenuItem::with_id("font_28", "28 像素", true, None);
         let f_32 = MenuItem::with_id("font_32", "32 像素", true, None);
-        font_submenu.append_items(&[&f_20, &f_24, &f_28, &f_32]).unwrap();
+        font_submenu
+            .append_items(&[&f_20, &f_24, &f_28, &f_32])
+            .unwrap();
         menu.append(&font_submenu).unwrap();
+
+        let size_submenu = Submenu::with_id("pet_size_sub", "调整桌宠大小", true);
+        let s_150 = MenuItem::with_id("size_150", "小 (150 像素)", true, None);
+        let s_200 = MenuItem::with_id("size_200", "中 (200 像素)", true, None);
+        let s_250 = MenuItem::with_id("size_250", "大 (250 像素)", true, None);
+        let s_300 = MenuItem::with_id("size_300", "特大 (300 像素)", true, None);
+        size_submenu
+            .append_items(&[&s_150, &s_200, &s_250, &s_300])
+            .unwrap();
+        menu.append(&size_submenu).unwrap();
 
         let config_submenu = Submenu::with_id("config_sub", "系统参数设置", true);
         let c_clear = MenuItem::with_id("action_clear", "清空对话历史", true, None);
         let c_sleep_30 = MenuItem::with_id("sleep_30", "显存休眠 30 秒", true, None);
         let c_sleep_60 = MenuItem::with_id("sleep_60", "显存休眠 60 秒", true, None);
         let c_sleep_120 = MenuItem::with_id("sleep_120", "显存休眠 120 秒", true, None);
-        config_submenu.append_items(&[&c_clear, &c_sleep_30, &c_sleep_60, &c_sleep_120]).unwrap();
+        config_submenu
+            .append_items(&[&c_clear, &c_sleep_30, &c_sleep_60, &c_sleep_120])
+            .unwrap();
         menu.append(&config_submenu).unwrap();
-        
+
         let rename_item = MenuItem::with_id("action_rename", "🖊️ 修改桌宠名字", true, None);
         menu.append(&rename_item).unwrap();
 
@@ -500,7 +636,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let m_show = MenuItem::with_id("memory_show_info", "查看记忆详情", true, None);
         let m_open = MenuItem::with_id("memory_open_dir", "打开记忆目录", true, None);
         let m_clear = MenuItem::with_id("memory_clear", "清空所有记忆", true, None);
-        memory_submenu.append_items(&[&m_show, &m_open, &m_clear]).unwrap();
+        memory_submenu
+            .append_items(&[&m_show, &m_open, &m_clear])
+            .unwrap();
         menu.append(&memory_submenu).unwrap();
 
         menu.append(&PredefinedMenuItem::separator()).unwrap();
@@ -514,52 +652,100 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build()
             .unwrap()
     };
-    
-    // Enlarged window dimension for premium aesthetics
-    let win_width = 360;
-    let win_height = 440;
 
-    // 3. Setup Window
+    // Pet Window Logical Dimension (tight wrapping)
+    let pet_win_width = config.pet_size;
+    let pet_win_height = config.pet_size;
+
+    // Bubble Window Initial Logical Dimension (will dynamically adapt)
+    let mut bubble_win_width = 300;
+    let mut bubble_win_height = 200;
+
+    // 3. Setup Window (Pet Window)
     let window = WindowBuilder::new()
         .with_title("Nimbus Desk Pet Widget")
-        .with_decorations(false)           // Borderless
-        .with_transparent(true)             // Transparent background
-        .with_resizable(false)              // Lock size
+        .with_decorations(false) // Borderless
+        .with_transparent(true) // Transparent background
+        .with_resizable(false) // Lock size
         .with_window_level(if config.always_on_top {
             winit::window::WindowLevel::AlwaysOnTop
         } else {
             winit::window::WindowLevel::Normal
         })
-        .with_inner_size(winit::dpi::PhysicalSize::new(win_width, win_height))
+        .with_inner_size(winit::dpi::LogicalSize::new(
+            pet_win_width as f64,
+            pet_win_height as f64,
+        ))
         .build(&event_loop)?;
 
-    // Position window in bottom right corner by default
+    // Setup Bubble Window (Click-through, hidden initially)
+    let bubble_window = WindowBuilder::new()
+        .with_title("Nimbus Desk Pet Bubble")
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_resizable(false)
+        .with_window_level(if config.always_on_top {
+            winit::window::WindowLevel::AlwaysOnTop
+        } else {
+            winit::window::WindowLevel::Normal
+        })
+        .with_inner_size(winit::dpi::LogicalSize::new(
+            bubble_win_width as f64,
+            bubble_win_height as f64,
+        ))
+        .with_visible(false)
+        .build(&event_loop)?;
+
+    bubble_window.set_cursor_hittest(false).unwrap(); // Enable click-through
+
+    // Position windows in bottom right corner by default
     if let Some(monitor) = window.current_monitor() {
         let screen_size = monitor.size();
-        let x = screen_size.width - win_width - 50;
-        let y = screen_size.height - win_height - 100;
+        let scale_factor = window.scale_factor();
+        let x = screen_size.width - (pet_win_width as f64 * scale_factor) as u32 - 50;
+        let y = screen_size.height - (pet_win_height as f64 * scale_factor) as u32 - 100;
         window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
     }
 
     let window = Arc::new(window);
     let window_clone = window.clone();
+    let bubble_window = Arc::new(bubble_window);
+    let bubble_window_clone = bubble_window.clone();
 
     // Spawn Background Frame redraw trigger (30 FPS)
     let window_for_redraw = window_clone.clone();
+    let bubble_window_for_redraw = bubble_window_clone.clone();
     tokio::spawn(async move {
         loop {
             window_for_redraw.request_redraw();
+            bubble_window_for_redraw.request_redraw();
             tokio::time::sleep(std::time::Duration::from_millis(33)).await;
         }
     });
 
-    // 3. Initialize Wgpu State
-    let mut wgpu_state = WgpuState::new(window.clone(), win_width, win_height).await?;
+    // 3. Initialize Wgpu States
+    let mut wgpu_state = WgpuState::new(window.clone(), pet_win_width, pet_win_height).await?;
+    let mut bubble_wgpu_state =
+        WgpuState::new(bubble_window.clone(), bubble_win_width, bubble_win_height).await?;
 
-    // 4. Initialize custom 2D Renderer and state
-    let mut pet_renderer = PetRenderer::new(win_width, win_height);
+    // 4. Initialize custom 2D Renderers
+    let mut pet_renderer = PetRenderer::new(pet_win_width, pet_win_height);
+    pet_renderer.draw_bubble_enabled = false;
+    pet_renderer.draw_pet_enabled = true;
+    pet_renderer.scale_factor = window.scale_factor() as f32;
     pet_renderer.set_font_size(config.font_size);
-    pet_renderer.set_text(&format!("你好呀！我是桌宠{}！\n请在终端打字和我聊天吧~", config.pet_name));
+    pet_renderer.active_style = config.pet_style.clone();
+
+    let mut bubble_renderer = PetRenderer::new(bubble_win_width, bubble_win_height);
+    bubble_renderer.draw_bubble_enabled = true;
+    bubble_renderer.draw_pet_enabled = false;
+    bubble_renderer.scale_factor = bubble_window.scale_factor() as f32;
+    bubble_renderer.set_font_size(config.font_size);
+    bubble_renderer.active_style = config.pet_style.clone();
+    bubble_renderer.set_text(&format!(
+        "你好呀！我是桌宠{}！\n请在终端打字和我聊天吧~",
+        config.pet_name
+    ));
 
     // 5. Initialize in-process LlamaEngine with Smart Idle Offload config
     let llama_engine = if let Some(model_path) = &config.model_path {
@@ -581,7 +767,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Shared State for User Activity Observer (AppName, LocalHour)
     let observer_state = Arc::new(std::sync::Mutex::new(("未知应用".to_string(), 12u32)));
     let observer_state_clone = observer_state.clone();
-    
+
     // Spawn Background Activity Observer Task (Every 45 seconds)
     let memory_clone = memory.clone();
     tokio::spawn(async move {
@@ -608,7 +794,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut is_muttering = false;
     let mut last_mouse_phys_x = 0.0f64;
     let mut last_mouse_phys_y = 0.0f64;
-    
+
     // Channels for text streaming and terminal input
     let (tx, mut rx) = mpsc::channel::<String>(100);
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(100);
@@ -621,7 +807,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use tokio::io::{AsyncBufReadExt, BufReader};
         let mut reader = BufReader::new(tokio::io::stdin());
         let mut line = String::new();
-        
+
         println!("==================================================");
         println!("      桌宠 {} 极速推理与资源优化版       ", pet_name_clone);
         println!("==================================================");
@@ -630,13 +816,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("* 在此终端输入文字按 [回车] 即可与屏幕桌宠聊天。");
         println!("* 输入 /clear 清空上下文，输入 /exit 退出程序。");
         println!("==================================================");
-        
+
         loop {
             line.clear();
             print!("\n>> ");
             use std::io::Write;
             let _ = std::io::stdout().flush();
-            
+
             match reader.read_line(&mut line).await {
                 Ok(0) => break, // EOF
                 Ok(_) => {
@@ -664,6 +850,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Trigger initial redraw
     window_clone.request_redraw();
+    bubble_window_clone.request_redraw();
 
     let window_for_run = window_clone.clone();
 
@@ -677,11 +864,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             false
         };
-        
+
         if was_online && !is_online {
             // Smart Offload Timeout Triggered (Model exited VRAM)
             pet_renderer.pet_state = "sleeping".to_string();
-            pet_renderer.set_text("显存已释放，我先去打个盹啦，呼...");
+            bubble_renderer.set_text("显存已释放，我先去打个盹啦，呼...");
             bubble_timer = Some(std::time::Instant::now());
             bubble_show_duration = std::time::Duration::from_secs(8);
             last_interactive_time = std::time::Instant::now();
@@ -707,7 +894,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = engine.clear_history();
                 }
                 active_response.clear();
-                pet_renderer.set_text("✨ 对话上下文已重置！");
+                bubble_renderer.set_text("✨ 对话上下文已重置！");
                 bubble_timer = Some(std::time::Instant::now());
                 bubble_show_duration = std::time::Duration::from_secs(6);
                 last_interactive_time = std::time::Instant::now();
@@ -721,7 +908,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 in_thinking_block = false;
                 active_response.clear();
                 pet_renderer.pet_state = "thinking".to_string();
-                pet_renderer.set_text("思考中...");
+                bubble_renderer.set_text("思考中...");
                 bubble_timer = None; // Disable hide timer during generation
                 last_interactive_time = std::time::Instant::now();
                 window_for_run.request_redraw();
@@ -769,7 +956,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             } else {
                 active_response = "本地模型未加载！\n请在 config.toml 中配置 model_path。".to_string();
-                pet_renderer.set_text(&active_response);
+                bubble_renderer.set_text(&active_response);
                 bubble_timer = Some(std::time::Instant::now());
                 bubble_show_duration = std::time::Duration::from_secs(6);
                 window_for_run.request_redraw();
@@ -795,11 +982,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         active_response.push_str(&out.content);
                     }
                 }
-                pet_renderer.set_text(&active_response);
+                bubble_renderer.set_text(&active_response);
                 is_muttering = false;
-                
                 println!();
-                
+
                 bubble_timer = Some(std::time::Instant::now());
                 bubble_show_duration = std::time::Duration::from_secs(config.bubble_timeout_secs);
                 last_interactive_time = std::time::Instant::now();
@@ -814,7 +1000,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
                 let mutter = get_offline_mutter(&app, hour);
-                pet_renderer.set_text(&mutter);
+                bubble_renderer.set_text(&mutter);
                 is_muttering = false;
                 bubble_timer = Some(std::time::Instant::now());
                 bubble_show_duration = std::time::Duration::from_secs(8);
@@ -842,7 +1028,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         active_response.push_str(&out.content);
                     }
                 }
-                pet_renderer.set_text(&active_response);
+                bubble_renderer.set_text(&active_response);
                 window_for_run.request_redraw();
             }
         }
@@ -851,193 +1037,247 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(timer) = bubble_timer {
             if std::time::Instant::now().duration_since(timer) > bubble_show_duration {
                 active_response.clear();
-                pet_renderer.set_text("");
+                bubble_renderer.set_text("");
                 bubble_timer = None;
-                // If it was sleeping, keep the sleep animation but hide bubble
                 window_for_run.request_redraw();
             }
         }
 
-        match event {
-            Event::WindowEvent { event, .. } => match event {
-                WindowEvent::CloseRequested => {
-                    elwt.exit();
-                }
-                WindowEvent::Resized(size) => {
-                    wgpu_state.resize(size.width, size.height);
-                    window_for_run.request_redraw();
-                }
-                WindowEvent::RedrawRequested => {
-                    if !pet_renderer.pointer_inside {
-                        use mouse_position::mouse_position::Mouse;
-                        if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
-                            if let Ok(win_pos) = window_for_run.outer_position() {
-                                let scale_factor = window_for_run.scale_factor();
-                                let px = x as f64 * scale_factor;
-                                let py = y as f64 * scale_factor;
-                                let wx = px - win_pos.x as f64;
-                                let wy = py - win_pos.y as f64;
-                                pet_renderer.set_mouse_position(Some((wx as f32, wy as f32)));
-                                pet_renderer.pointer_x = wx as f32 / (win_width as f32 / 24.0);
-                                pet_renderer.pointer_y = wy as f32 / (win_height as f32 / 24.0);
-                            }
-                        }
-                    }
+        // Position & Size alignment step
+        let pet_scale = window_for_run.scale_factor() as f32;
+        let bubble_scale = bubble_window_clone.scale_factor() as f32;
 
-                    // 智能状态决策引擎 (Smart State Decision Engine)
-                    let current_state = {
-                        let now_inst = std::time::Instant::now();
-                        let is_surprised = if let Some(st) = surprised_timer {
-                            now_inst.duration_since(st) < std::time::Duration::from_millis(1500)
-                        } else {
-                            false
-                        };
+        pet_renderer.scale_factor = pet_scale;
+        bubble_renderer.scale_factor = bubble_scale;
 
-                        if is_surprised {
-                            "surprised".to_string()
-                        } else if is_pointer_on_pet {
-                            "tickled".to_string()
-                        } else if is_muttering {
-                            if in_thinking_block {
-                                "thinking".to_string()
-                            } else {
-                                "muttering".to_string()
-                            }
-                        } else if pet_renderer.pointer_inside {
-                            "attentive".to_string()
-                        } else if !is_online {
-                            "sleeping".to_string()
-                        } else {
-                            // 场景关联：陪伴工作 (working) / 深夜疲劳 (tired) / 挂机发呆 (bored) / 常规待机 (idle)
-                            let (app, hour) = {
-                                if let Ok(guard) = observer_state.lock() {
-                                    guard.clone()
-                                } else {
-                                    ("未知应用".to_string(), 12)
-                                }
-                            };
-                            let idle_duration = now_inst.duration_since(last_interactive_time);
-                            
-                            if idle_duration > std::time::Duration::from_secs(90) {
-                                "bored".to_string()
-                            } else {
-                                let app_lower = app.to_lowercase();
-                                let is_dev_app = app_lower.contains("code") 
-                                    || app_lower.contains("terminal") 
-                                    || app_lower.contains("xcode") 
-                                    || app_lower.contains("cargo") 
-                                    || app_lower.contains("idea")
-                                    || app_lower.contains("warp");
-                                    
-                                if is_dev_app {
-                                    "working".to_string()
-                                } else if hour >= 23 || hour <= 5 {
-                                    "tired".to_string()
-                                } else {
-                                    "idle".to_string()
-                                }
-                            }
-                        }
+        if bubble_timer.is_some() && bubble_renderer.has_text() {
+            let (b_w_phys, b_h_phys) = bubble_renderer.measure_bubble_size();
+            if b_w_phys > 0.0 && b_h_phys > 0.0 {
+                let b_w_log = b_w_phys as f64 / bubble_scale as f64;
+                let b_h_log = b_h_phys as f64 / bubble_scale as f64;
+
+                let current_size = bubble_window_clone.inner_size();
+                if (current_size.width as f64 - b_w_phys as f64).abs() > 1.0
+                    || (current_size.height as f64 - b_h_phys as f64).abs() > 1.0 {
+                    let _ = bubble_window_clone.request_inner_size(winit::dpi::LogicalSize::new(b_w_log, b_h_log));
+                    bubble_wgpu_state.resize(b_w_phys.round() as u32, b_h_phys.round() as u32);
+                    bubble_renderer.resize(b_w_phys.round() as u32, b_h_phys.round() as u32);
+                }
+
+                if let Ok(pet_pos) = window_for_run.outer_position() {
+                    let pet_size = window_for_run.inner_size();
+                    let bubble_size = bubble_window_clone.inner_size();
+
+                    let bubble_y = if pet_pos.y < bubble_size.height as i32 + 30 {
+                        bubble_renderer.bubble_on_bottom = true;
+                        pet_pos.y + pet_size.height as i32
+                    } else {
+                        bubble_renderer.bubble_on_bottom = false;
+                        pet_pos.y - bubble_size.height as i32
                     };
-                    pet_renderer.pet_state = current_state;
 
-                    pet_renderer.update_and_draw();
-                    
-                    let skia_data = pet_renderer.data();
-                    if let Err(e) = wgpu_state.render(skia_data) {
-                        eprintln!("wgpu render error: {:?}", e);
-                    }
-                    last_draw_time = std::time::Instant::now();
-                }
-                WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
-                    let is_on_pet = pet_renderer.body_hit_test(cursor_position.x, cursor_position.y).unwrap_or(false);
-                    
-                    if state == ElementState::Pressed {
-                        // Only allow drag if clicking directly on the enlarged pet body (cloud/cat/octopus pixels)
-                        if is_on_pet {
-                            if let Err(e) = window_for_run.drag_window() {
-                                eprintln!("Failed to drag window: {:?}", e);
-                            }
-                        }
-                    } else if state == ElementState::Released {
-                        // 拖拽窗口松手或点击松开瞬间触发受惊表情，持续 1.5 秒
-                        surprised_timer = Some(std::time::Instant::now());
-                        pet_renderer.add_emotion(-0.02, 0.15);
+                    let bubble_x = pet_pos.x + (pet_size.width as i32 - bubble_size.width as i32) / 2;
+
+                    let _ = bubble_window_clone.set_outer_position(winit::dpi::PhysicalPosition::new(bubble_x, bubble_y));
+                    if !bubble_window_clone.is_visible().unwrap_or(false) {
+                        bubble_window_clone.set_visible(true);
                     }
                 }
-                WindowEvent::CursorMoved { position, .. } => {
-                    pet_renderer.pointer_inside = true;
-                    cursor_position = position;
-                    last_interactive_time = std::time::Instant::now(); // 刷新活跃时间，即时唤醒挂机
-                    
-                    pet_renderer.set_mouse_position(Some((position.x as f32, position.y as f32)));
-                    
-                    pet_renderer.pointer_x = position.x as f32 / (win_width as f32 / 24.0);
-                    pet_renderer.pointer_y = position.y as f32 / (win_height as f32 / 24.0);
-                    
-                    // 物理移速差分计算 (惊讶状态触发器)
-                    let scale_factor = window_for_run.scale_factor();
-                    let phys_x = position.x * scale_factor;
-                    let phys_y = position.y * scale_factor;
-                    if last_mouse_phys_x > 0.0 && last_mouse_phys_y > 0.0 {
-                        let dx = phys_x - last_mouse_phys_x;
-                        let dy = phys_y - last_mouse_phys_y;
-                        let speed = (dx * dx + dy * dy).sqrt();
-                        if speed > 220.0 {
-                            surprised_timer = Some(std::time::Instant::now());
-                            pet_renderer.add_emotion(-0.08, 0.35);
-                        }
-                    }
-                    last_mouse_phys_x = phys_x;
-                    last_mouse_phys_y = phys_y;
+            }
+        } else {
+            if bubble_window_clone.is_visible().unwrap_or(false) {
+                bubble_window_clone.set_visible(false);
+            }
+        }
 
-                    // Reactive behavior: Hover check using pixel mask (Touch the cloud/cat/octopus)
-                    let is_on_pet = pet_renderer.body_hit_test(position.x, position.y).unwrap_or(false);
-                    is_pointer_on_pet = is_on_pet;
-                    
-                    if is_on_pet && !was_pointer_on_pet {
-                        // Just hovered onto pet!
-                        let now = std::time::Instant::now();
-                        let throttle = match last_hover_trigger_time {
-                            Some(t) => now.duration_since(t) > std::time::Duration::from_secs(15),
-                            None => true,
-                        };
-                        
-                        if throttle && pet_renderer.pet_state != "thinking" {
-                            last_hover_trigger_time = Some(now);
-                            last_interactive_time = now;
-                            
-                            // Touch increases happiness and excitement
-                            pet_renderer.add_emotion(0.18, 0.08);
-                            
-                            // Blush and speak cute words
-                            let blush_phrases = [
-                                "哎呀，摸到我啦~ (*^▽^*)",
-                                "好痒呀，主人在跟我玩嘛？",
-                                "贴贴！(*/ω＼*)",
-                                "小云朵被摸得很舒服，呼呼..."
-                            ];
-                            let idx = get_pseudo_random_index(blush_phrases.len());
-                            pet_renderer.set_text(blush_phrases[idx]);
-                            
-                            bubble_timer = Some(now);
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+        match event {
+            Event::WindowEvent { event, window_id } => {
+                if window_id == window_for_run.id() {
+                    match event {
+                        WindowEvent::CloseRequested => {
+                            elwt.exit();
+                        }
+                        WindowEvent::Resized(size) => {
+                            wgpu_state.resize(size.width, size.height);
                             window_for_run.request_redraw();
                         }
+                        WindowEvent::RedrawRequested => {
+                            if !pet_renderer.pointer_inside {
+                                use mouse_position::mouse_position::Mouse;
+                                if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                                    if let Ok(win_pos) = window_for_run.outer_position() {
+                                        let scale_factor = window_for_run.scale_factor();
+                                        let px = x as f64 * scale_factor;
+                                        let py = y as f64 * scale_factor;
+                                        let wx = px - win_pos.x as f64;
+                                        let wy = py - win_pos.y as f64;
+                                        pet_renderer.set_mouse_position(Some((wx as f32, wy as f32)));
+                                        pet_renderer.pointer_x = wx as f32 / (pet_win_width as f32 / 24.0);
+                                        pet_renderer.pointer_y = wy as f32 / (pet_win_height as f32 / 24.0);
+                                    }
+                                }
+                            }
+
+                            // 智能状态决策引擎 (Smart State Decision Engine)
+                            let current_state = {
+                                let now_inst = std::time::Instant::now();
+                                let is_surprised = if let Some(st) = surprised_timer {
+                                    now_inst.duration_since(st) < std::time::Duration::from_millis(1500)
+                                } else {
+                                    false
+                                };
+
+                                if is_surprised {
+                                    "surprised".to_string()
+                                } else if is_pointer_on_pet {
+                                    "tickled".to_string()
+                                } else if is_muttering {
+                                    if in_thinking_block {
+                                        "thinking".to_string()
+                                    } else {
+                                        "muttering".to_string()
+                                    }
+                                } else if pet_renderer.pointer_inside {
+                                    "attentive".to_string()
+                                } else if !is_online {
+                                    "sleeping".to_string()
+                                } else {
+                                    let (app, hour) = {
+                                        if let Ok(guard) = observer_state.lock() {
+                                            guard.clone()
+                                        } else {
+                                            ("未知应用".to_string(), 12)
+                                        }
+                                    };
+                                    let idle_duration = now_inst.duration_since(last_interactive_time);
+
+                                    if idle_duration > std::time::Duration::from_secs(90) {
+                                        "bored".to_string()
+                                    } else {
+                                        let app_lower = app.to_lowercase();
+                                        let is_dev_app = app_lower.contains("code")
+                                            || app_lower.contains("terminal")
+                                            || app_lower.contains("xcode")
+                                            || app_lower.contains("cargo")
+                                            || app_lower.contains("idea")
+                                            || app_lower.contains("warp");
+
+                                        if is_dev_app {
+                                            "working".to_string()
+                                        } else if hour >= 23 || hour <= 5 {
+                                            "tired".to_string()
+                                        } else {
+                                            "idle".to_string()
+                                        }
+                                    }
+                                }
+                            };
+                            pet_renderer.pet_state = current_state;
+
+                            pet_renderer.update_and_draw();
+
+                            let skia_data = pet_renderer.data();
+                            if let Err(e) = wgpu_state.render(skia_data) {
+                                eprintln!("wgpu render error: {:?}", e);
+                            }
+                            last_draw_time = std::time::Instant::now();
+                        }
+                        WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => {
+                            let is_on_pet = pet_renderer.body_hit_test(cursor_position.x, cursor_position.y).unwrap_or(false);
+
+                            if state == ElementState::Pressed {
+                                if is_on_pet {
+                                    if let Err(e) = window_for_run.drag_window() {
+                                        eprintln!("Failed to drag window: {:?}", e);
+                                    }
+                                }
+                            } else if state == ElementState::Released {
+                                surprised_timer = Some(std::time::Instant::now());
+                                pet_renderer.add_emotion(-0.02, 0.15);
+                            }
+                        }
+                        WindowEvent::CursorMoved { position, .. } => {
+                            pet_renderer.pointer_inside = true;
+                            cursor_position = position;
+                            last_interactive_time = std::time::Instant::now();
+
+                            pet_renderer.set_mouse_position(Some((position.x as f32, position.y as f32)));
+
+                            pet_renderer.pointer_x = position.x as f32 / (pet_win_width as f32 / 24.0);
+                            pet_renderer.pointer_y = position.y as f32 / (pet_win_height as f32 / 24.0);
+
+                            let scale_factor = window_for_run.scale_factor();
+                            let phys_x = position.x * scale_factor;
+                            let phys_y = position.y * scale_factor;
+                            if last_mouse_phys_x > 0.0 && last_mouse_phys_y > 0.0 {
+                                let dx = phys_x - last_mouse_phys_x;
+                                let dy = phys_y - last_mouse_phys_y;
+                                let speed = (dx * dx + dy * dy).sqrt();
+                                if speed > 220.0 {
+                                    surprised_timer = Some(std::time::Instant::now());
+                                    pet_renderer.add_emotion(-0.08, 0.35);
+                                }
+                            }
+                            last_mouse_phys_x = phys_x;
+                            last_mouse_phys_y = phys_y;
+
+                            let is_on_pet = pet_renderer.body_hit_test(position.x, position.y).unwrap_or(false);
+                            is_pointer_on_pet = is_on_pet;
+
+                            if is_on_pet && !was_pointer_on_pet {
+                                let now = std::time::Instant::now();
+                                let throttle = match last_hover_trigger_time {
+                                    Some(t) => now.duration_since(t) > std::time::Duration::from_secs(15),
+                                    None => true,
+                                };
+
+                                if throttle && pet_renderer.pet_state != "thinking" {
+                                    last_hover_trigger_time = Some(now);
+                                    last_interactive_time = now;
+                                    pet_renderer.add_emotion(0.18, 0.08);
+
+                                    let blush_phrases = [
+                                        "哎呀，摸到我啦~ (*^▽^*)",
+                                        "好痒呀，主人在跟我玩嘛？",
+                                        "贴贴！(*/ω＼*)",
+                                        "小云朵被摸得很舒服，呼呼..."
+                                    ];
+                                    let idx = get_pseudo_random_index(blush_phrases.len());
+                                    bubble_renderer.set_text(blush_phrases[idx]);
+
+                                    bubble_timer = Some(now);
+                                    bubble_show_duration = std::time::Duration::from_secs(5);
+                                    window_for_run.request_redraw();
+                                }
+                            }
+                            was_pointer_on_pet = is_on_pet;
+                            window_for_run.request_redraw();
+                        }
+                        WindowEvent::CursorLeft { .. } => {
+                            pet_renderer.pointer_inside = false;
+                            is_pointer_on_pet = false;
+                            window_for_run.request_redraw();
+                        }
+                        _ => {}
                     }
-                    was_pointer_on_pet = is_on_pet;
-                    window_for_run.request_redraw();
+                } else if window_id == bubble_window_clone.id() {
+                    match event {
+                        WindowEvent::RedrawRequested => {
+                            if bubble_timer.is_some() && bubble_renderer.has_text() {
+                                bubble_renderer.update_and_draw();
+                                let skia_data = bubble_renderer.data();
+                                if let Err(e) = bubble_wgpu_state.render(skia_data) {
+                                    eprintln!("bubble wgpu render error: {:?}", e);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                WindowEvent::CursorLeft { .. } => {
-                    pet_renderer.pointer_inside = false;
-                    is_pointer_on_pet = false;
-                    window_for_run.request_redraw();
-                }
-                _ => {}
-            },
+            }
             Event::AboutToWait => {
                 let now = std::time::Instant::now();
-                
+
                 // Handle System Tray/Menubar events
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
                     let id = event.id.0.as_str();
@@ -1050,7 +1290,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(new_name) = prompt_for_pet_name(&config.pet_name) {
                                 config.pet_name = new_name.clone();
                                 config.save();
-                                pet_renderer.set_text(&format!("✨ 从现在开始我就叫 [{}] 啦！", config.pet_name));
+                                bubble_renderer.set_text(&format!("✨ 从现在开始我就叫 [{}] 啦！", config.pet_name));
                                 bubble_timer = Some(std::time::Instant::now());
                                 bubble_show_duration = std::time::Duration::from_secs(5);
                                 window_for_run.request_redraw();
@@ -1073,12 +1313,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let active_desc = if top_apps.is_empty() {
                                         "暂无前台应用习惯记录。".to_string()
                                     } else {
-                                        format!("主人最常用的前台应用是：{}；通常活跃时间是：{}。", 
+                                        format!("主人最常用的前台应用是：{}；通常活跃时间是：{}。",
                                             top_apps.join(", "),
                                             top_hours.iter().map(|h| format!("{}点", h)).collect::<Vec<_>>().join("/")
                                         )
                                     };
-                                    format!("记忆文件：~/.nimbus_memory.json\\n文件大小：{}\\n互动次数：{}次\\n\\n【日常习惯习惯记忆】\\n{}", 
+                                    format!("记忆文件：~/.nimbus_memory.json\\n文件大小：{}\\n互动次数：{}次\\n\\n【日常习惯习惯记忆】\\n{}",
                                         size_str, mem.total_interactions, active_desc)
                                 } else {
                                     "无法读取记忆。".to_string()
@@ -1093,7 +1333,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "memory_clear" => {
                             if let Ok(mut mem) = memory.lock() {
                                 mem.clear();
-                                pet_renderer.set_text("✨ 主人，我的记忆已经全部清空啦！");
+                                bubble_renderer.set_text("✨ 主人，我的记忆已经全部清空啦！");
                                 bubble_timer = Some(std::time::Instant::now());
                                 bubble_show_duration = std::time::Duration::from_secs(5);
                                 window_for_run.request_redraw();
@@ -1103,7 +1343,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "persona_default" => {
                             config.persona = "default".to_string();
                             config.save();
-                            pet_renderer.set_text(&format!("✨ 我现在是软萌活泼的{}哦~", config.pet_name));
+                            bubble_renderer.set_text(&format!("✨ 我现在是软萌活泼的{}哦~", config.pet_name));
                             bubble_timer = Some(std::time::Instant::now());
                             bubble_show_duration = std::time::Duration::from_secs(5);
                             window_for_run.request_redraw();
@@ -1111,7 +1351,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "persona_tsundere" => {
                             config.persona = "tsundere".to_string();
                             config.save();
-                            pet_renderer.set_text("✨ 哼，才不是想让你陪我呢！");
+                            bubble_renderer.set_text("哼，才不是想让你陪我呢！");
                             bubble_timer = Some(std::time::Instant::now());
                             bubble_show_duration = std::time::Duration::from_secs(5);
                             window_for_run.request_redraw();
@@ -1119,7 +1359,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "persona_toxic" => {
                             config.persona = "toxic".to_string();
                             config.save();
-                            pet_renderer.set_text("✨ 主人，今天的工作完成了吗？");
+                            bubble_renderer.set_text("今天的工作完成了吗？");
                             bubble_timer = Some(std::time::Instant::now());
                             bubble_show_duration = std::time::Duration::from_secs(5);
                             window_for_run.request_redraw();
@@ -1127,7 +1367,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "persona_moe" => {
                             config.persona = "moe".to_string();
                             config.save();
-                            pet_renderer.set_text(&format!("✨ 亲爱的，{}最喜欢你啦~", config.pet_name));
+                            bubble_renderer.set_text(&format!("亲爱的，{}最喜欢你啦~", config.pet_name));
+                            bubble_timer = Some(std::time::Instant::now());
+                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            window_for_run.request_redraw();
+                        }
+                        "style_nimbus" => {
+                            config.pet_style = "nimbus".to_string();
+                            config.save();
+                            pet_renderer.active_style = "nimbus".to_string();
+                            bubble_renderer.active_style = "nimbus".to_string();
+                            bubble_renderer.set_text("✨ 变身！我现在是粉蓝小云朵啦~");
+                            bubble_timer = Some(std::time::Instant::now());
+                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            window_for_run.request_redraw();
+                        }
+                        "style_mochi" => {
+                            config.pet_style = "mochi".to_string();
+                            config.save();
+                            pet_renderer.active_style = "mochi".to_string();
+                            bubble_renderer.active_style = "mochi".to_string();
+                            bubble_renderer.set_text("✨ 变身！我现在是抹茶猫咪麻薯喵~");
+                            bubble_timer = Some(std::time::Instant::now());
+                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            window_for_run.request_redraw();
+                        }
+                        "style_starlit" => {
+                            config.pet_style = "starlit".to_string();
+                            config.save();
+                            pet_renderer.active_style = "starlit".to_string();
+                            bubble_renderer.active_style = "starlit".to_string();
+                            bubble_renderer.set_text("✨ 变身！我现在是太空章鱼咕噜~");
+                            bubble_timer = Some(std::time::Instant::now());
+                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            window_for_run.request_redraw();
+                        }
+                        "style_crab" => {
+                            config.pet_style = "crab".to_string();
+                            config.save();
+                            pet_renderer.active_style = "crab".to_string();
+                            bubble_renderer.active_style = "crab".to_string();
+                            bubble_renderer.set_text("✨ 变身！我现在是红螯小螃蟹咔嚓~");
+                            bubble_timer = Some(std::time::Instant::now());
+                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            window_for_run.request_redraw();
+                        }
+                        "size_150" | "size_200" | "size_250" | "size_300" => {
+                            let new_size = match id {
+                                "size_150" => 150,
+                                "size_200" => 200,
+                                "size_250" => 250,
+                                "size_300" => 300,
+                                _ => 200,
+                            };
+                            config.pet_size = new_size;
+                            config.save();
+
+                            let pet_scale = window_for_run.scale_factor();
+                            let _ = window_for_run.request_inner_size(winit::dpi::LogicalSize::new(new_size as f64, new_size as f64));
+                            let p_w_phys = (new_size as f64 * pet_scale).round() as u32;
+                            let p_h_phys = (new_size as f64 * pet_scale).round() as u32;
+                            wgpu_state.resize(p_w_phys, p_h_phys);
+                            pet_renderer.resize(p_w_phys, p_h_phys);
+
+                            bubble_renderer.set_text(&format!("✨ 身体缩放完成！当前尺寸：{} 像素", new_size));
                             bubble_timer = Some(std::time::Instant::now());
                             bubble_show_duration = std::time::Duration::from_secs(5);
                             window_for_run.request_redraw();
@@ -1136,24 +1439,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             config.font_size = 20.0;
                             config.save();
                             pet_renderer.set_font_size(20.0);
+                            bubble_renderer.set_font_size(20.0);
                             window_for_run.request_redraw();
                         }
                         "font_24" => {
                             config.font_size = 24.0;
                             config.save();
                             pet_renderer.set_font_size(24.0);
+                            bubble_renderer.set_font_size(24.0);
                             window_for_run.request_redraw();
                         }
                         "font_28" => {
                             config.font_size = 28.0;
                             config.save();
                             pet_renderer.set_font_size(28.0);
+                            bubble_renderer.set_font_size(28.0);
                             window_for_run.request_redraw();
                         }
                         "font_32" => {
                             config.font_size = 32.0;
                             config.save();
                             pet_renderer.set_font_size(32.0);
+                            bubble_renderer.set_font_size(32.0);
                             window_for_run.request_redraw();
                         }
                         "action_clear" => {
@@ -1161,7 +1468,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = engine.clear_history();
                             }
                             active_response.clear();
-                            pet_renderer.set_text("✨ 对话上下文已重置！");
+                            bubble_renderer.set_text("✨ 对话上下文已重置！");
                             bubble_timer = Some(std::time::Instant::now());
                             bubble_show_duration = std::time::Duration::from_secs(5);
                             window_for_run.request_redraw();
@@ -1186,14 +1493,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {}
                     }
                 }
-                
+
                 // Periodic Muttering: Check if idle for > 3 minutes (180 seconds)
                 if config.mutter_enabled && now.duration_since(last_interactive_time) > std::time::Duration::from_secs(180) && bubble_timer.is_none() {
                     last_interactive_time = now;
-                    
+
                     if let Some(ref engine) = llama_engine {
                         if engine.is_model_online() {
-                            // Smart model-driven muttering: Query LLM with current app Context
                             let (app, hour) = {
                                 if let Ok(guard) = observer_state.lock() {
                                     guard.clone()
@@ -1224,10 +1530,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "人设设定：{}。{}。你的主人当前正处于前台应用：{}。现在时间小时数是：{}。你是一只可爱的桌宠{}，你在无聊地自言自语。请配合这个应用或时间以及你的记忆和人设语气自发说一句话，不要带任何格式，不超过二十个字。",
                                 persona_prompt, memory_desc, app, hour, config.pet_name
                             );
-                            
+
                             let engine_clone = engine.clone();
                             let tx_clone = tx.clone();
-                            
+
                             tokio::spawn(async move {
                                 if let Ok(mut stream) = engine_clone.generate_mutter_stream(&prompt).await {
                                     while let Some(chunk) = stream.next().await {
@@ -1239,7 +1545,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             });
                         } else {
-                            // Model offline offloaded: Fallback to lightweight template muttering
                             let (app, hour) = {
                                 if let Ok(guard) = observer_state.lock() {
                                     guard.clone()
@@ -1248,23 +1553,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             };
                             let mutter = get_offline_mutter(&app, hour);
-                            pet_renderer.set_text(&mutter);
+                            bubble_renderer.set_text(&mutter);
                             bubble_timer = Some(now);
                             bubble_show_duration = std::time::Duration::from_secs(8);
                             window_for_run.request_redraw();
                         }
                     }
                 }
-                
-                let is_active = pet_renderer.pointer_inside 
-                    || pet_renderer.pet_state == "thinking" 
+
+                let is_active = pet_renderer.pointer_inside
+                    || pet_renderer.pet_state == "thinking"
                     || bubble_timer.is_some();
                 let interval = if is_active {
                     std::time::Duration::from_millis(16)
                 } else {
                     std::time::Duration::from_millis(83)
                 };
-                
+
                 if now.duration_since(last_draw_time) >= interval {
                     window_for_run.request_redraw();
                 }

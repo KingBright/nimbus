@@ -81,28 +81,54 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    fn get_config_path() -> PathBuf {
+        if let Ok(home) = std::env::var("HOME") {
+            PathBuf::from(home).join(".nimbus_config.toml")
+        } else {
+            PathBuf::from("config.toml")
+        }
+    }
+
     pub fn load_or_create() -> Self {
-        let config_path = PathBuf::from("config.toml");
-        if config_path.exists() {
-            if let Ok(content) = fs::read_to_string(&config_path) {
-                if let Ok(config) = toml::from_str(&content) {
+        let global_path = Self::get_config_path();
+
+        // 1. 优先读取位于用户家目录下的全局唯一的 ~/.nimbus_config.toml
+        if global_path.exists() {
+            if let Ok(content) = fs::read_to_string(&global_path) {
+                if let Ok(config) = toml::from_str::<Self>(&content) {
                     return config;
                 }
             }
         }
 
-        let default_config = Self::default();
-        if let Ok(toml_str) = toml::to_string_pretty(&default_config) {
-            let _ = fs::write(&config_path, toml_str);
+        // 2. 若全局配置文件不存在，尝试加载当前工作目录下原有的老版本地 config.toml 配置文件
+        let local_path = PathBuf::from("config.toml");
+        if local_path.exists() {
+            if let Ok(content) = fs::read_to_string(&local_path) {
+                if let Ok(config) = toml::from_str::<Self>(&content) {
+                    // 读取成功，将现有本地配置平滑迁移拷贝并持久化至家目录下，保证之前的 model_path 等设置不丢失
+                    let _ = config.save_to_path(&global_path);
+                    return config;
+                }
+            }
         }
+
+        // 3. 都没有则直接使用系统默认配置，并在家目录下创建全局配置文件
+        let default_config = Self::default();
+        let _ = default_config.save_to_path(&global_path);
         default_config
     }
 
-    pub fn save(&self) {
-        let config_path = PathBuf::from("config.toml");
+    fn save_to_path(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
         if let Ok(toml_str) = toml::to_string_pretty(self) {
-            let _ = fs::write(&config_path, toml_str);
+            fs::write(path, toml_str)?;
         }
+        Ok(())
+    }
+
+    pub fn save(&self) {
+        let global_path = Self::get_config_path();
+        let _ = self.save_to_path(&global_path);
     }
 }
 

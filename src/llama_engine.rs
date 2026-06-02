@@ -194,7 +194,10 @@ impl LlamaEngine {
                             let new_ctx = match model.new_context(&backend, ctx_params) {
                                 Ok(c) => c,
                                 Err(e) => {
-                                    eprintln!("[LlamaEngine] Failed to allocate chat context: {:?}", e);
+                                    eprintln!(
+                                        "[LlamaEngine] Failed to allocate chat context: {:?}",
+                                        e
+                                    );
                                     is_online.store(false, Ordering::SeqCst);
                                     active_metal_context_bytes.store(0, Ordering::SeqCst);
                                     let _ = tx.blocking_send("❌ 推理上下文分配失败".to_string());
@@ -202,7 +205,7 @@ impl LlamaEngine {
                                 }
                             };
                             chat_ctx = Some(new_ctx);
-                            
+
                             let mut vram = estimated_chat_metal_context_bytes();
                             if mutter_ctx.is_some() {
                                 vram += MUTTER_KV_CACHE_BYTES;
@@ -233,12 +236,13 @@ impl LlamaEngine {
                                             );
                                             chat_history.clear();
                                             chat_ctx = None;
-                                            
+
                                             let mut vram = 0;
                                             if mutter_ctx.is_some() {
                                                 vram = estimated_mutter_metal_context_bytes();
                                             }
-                                            active_metal_context_bytes.store(vram, Ordering::SeqCst);
+                                            active_metal_context_bytes
+                                                .store(vram, Ordering::SeqCst);
                                             n_past = 0;
                                             let _ = tx.blocking_send(
                                                 "⚠️ 历史对话上下文 Prefill 失败，已重置对话"
@@ -276,8 +280,8 @@ impl LlamaEngine {
                         for (i, &token) in new_tokens.iter().enumerate() {
                             let is_last = i == new_tokens.len() - 1;
                             if let Err(e) = batch.add(token, n_past + i as i32, &[0], is_last) {
-                                  eprintln!("[LlamaEngine] Failed to add token to batch: {:?}", e);
-                                  break;
+                                eprintln!("[LlamaEngine] Failed to add token to batch: {:?}", e);
+                                break;
                             }
                         }
 
@@ -363,7 +367,7 @@ impl LlamaEngine {
                             let drain_len = chat_history.len() - keep_len;
                             chat_history.drain(0..drain_len);
                             chat_ctx = None;
-                            
+
                             let mut vram = 0;
                             if mutter_ctx.is_some() {
                                 vram = estimated_mutter_metal_context_bytes();
@@ -374,25 +378,30 @@ impl LlamaEngine {
                     }
                     Ok(EngineCommand::Mutter { prompt, tx }) => {
                         is_online.store(true, Ordering::SeqCst);
-                        if mutter_ctx.is_none() {
-                            println!(
-                                "[LlamaEngine] VRAM mutter context is empty. Creating new LlamaContext..."
-                            );
-                            let ctx_params = LlamaContextParams::default()
-                                .with_n_ctx(std::num::NonZeroU32::new(2048))
-                                .with_n_batch(2048);
-                            match model.new_context(&backend, ctx_params) {
-                                Ok(new_ctx) => {
-                                    mutter_ctx = Some(new_ctx);
+
+                        // 强制先释放可能存在的旧 Mutter context，彻底归零 KV Cache 并回收显存
+                        mutter_ctx = None;
+
+                        let ctx_params = LlamaContextParams::default()
+                            .with_n_ctx(std::num::NonZeroU32::new(2048))
+                            .with_n_batch(2048);
+
+                        match model.new_context(&backend, ctx_params) {
+                            Ok(new_ctx) => {
+                                mutter_ctx = Some(new_ctx);
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[LlamaEngine] Failed to allocate mutter context: {:?}",
+                                    e
+                                );
+                                let _ = tx.blocking_send("[OFFLINE]".to_string());
+                                let mut vram = 0;
+                                if chat_ctx.is_some() {
+                                    vram = estimated_chat_metal_context_bytes();
                                 }
-                                Err(e) => {
-                                    eprintln!(
-                                        "[LlamaEngine] Failed to allocate mutter context: {:?}",
-                                        e
-                                    );
-                                    let _ = tx.blocking_send("[OFFLINE]".to_string());
-                                    continue;
-                                }
+                                active_metal_context_bytes.store(vram, Ordering::SeqCst);
+                                continue;
                             }
                         }
 
@@ -404,8 +413,7 @@ impl LlamaEngine {
 
                         let active_ctx = mutter_ctx.as_mut().unwrap();
                         let (formatted_prompt, add_bos) = format_mutter_prompt(
-                            &model,
-                            &prompt,
+                            &model, &prompt,
                             false, // Mutter is always stateless, independent of chat history
                         );
 
@@ -414,6 +422,12 @@ impl LlamaEngine {
                             Err(e) => {
                                 eprintln!("[LlamaEngine] Mutter tokenize failed: {:?}", e);
                                 let _ = tx.blocking_send("[OFFLINE]".to_string());
+                                mutter_ctx = None;
+                                let mut vram = 0;
+                                if chat_ctx.is_some() {
+                                    vram = estimated_chat_metal_context_bytes();
+                                }
+                                active_metal_context_bytes.store(vram, Ordering::SeqCst);
                                 continue;
                             }
                         };
@@ -430,6 +444,12 @@ impl LlamaEngine {
                         if let Err(e) = active_ctx.decode(&mut batch) {
                             eprintln!("[LlamaEngine] Mutter decode failed: {:?}", e);
                             let _ = tx.blocking_send("[OFFLINE]".to_string());
+                            mutter_ctx = None;
+                            let mut vram = 0;
+                            if chat_ctx.is_some() {
+                                vram = estimated_chat_metal_context_bytes();
+                            }
+                            active_metal_context_bytes.store(vram, Ordering::SeqCst);
                             continue;
                         }
 
@@ -511,6 +531,14 @@ impl LlamaEngine {
                                 generated_text.trim()
                             );
                         }
+
+                        // 推理结束后强行销毁 Mutter context，彻底归零 KV Cache 并立即回收显存资源
+                        mutter_ctx = None;
+                        let mut vram = 0;
+                        if chat_ctx.is_some() {
+                            vram = estimated_chat_metal_context_bytes();
+                        }
+                        active_metal_context_bytes.store(vram, Ordering::SeqCst);
                     }
                     Ok(EngineCommand::SetIdleTimeout(seconds)) => {
                         idle_timeout = std::time::Duration::from_secs(seconds.max(5));

@@ -4,10 +4,18 @@
 LOG_FILE="nimbus.log"
 
 # 1. 查找并清理已有进程
+SERVICE_NAME="fun.hackerlife.nimbus-pet"
+PLIST_FILE="$HOME/Library/LaunchAgents/${SERVICE_NAME}.plist"
+if [ -f "$PLIST_FILE" ]; then
+    echo "发现已注册的 launchd 服务，正在停止服务以防冲突..."
+    launchctl bootout "gui/$(id -u)" "$PLIST_FILE" 2>/dev/null
+    launchctl unload "$PLIST_FILE" 2>/dev/null
+fi
+
 PIDS=$(pgrep -x "nimbus")
 if [ -n "$PIDS" ]; then
     echo "发现正在运行的 Nimbus 桌宠，正在终止..."
-    echo "$PIDS" | xargs kill
+    echo "$PIDS" | xargs kill -9 2>/dev/null
     sleep 0.5
 fi
 
@@ -23,24 +31,17 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# 3. 自动探测二进制路径
-METADATA_DIR=$(cargo metadata --format-version 1 | grep -o '"target_directory":"[^"]*' | cut -d'"' -f4)
-
-if [ -n "$CARGO_TARGET_DIR" ] && [ -f "$CARGO_TARGET_DIR/release/nimbus" ]; then
-    PET_BIN="$CARGO_TARGET_DIR/release/nimbus"
-elif [ -f "$METADATA_DIR/release/nimbus" ]; then
+# 3. 定位当前编译的二进制路径 (使用 sed 确保提取准确)
+METADATA_DIR=$(cargo metadata --format-version 1 | tr -d '\n' | sed -E 's/.*"target_directory":"([^"]*)".*/\1/' 2>/dev/null)
+if [ -n "$METADATA_DIR" ]; then
     PET_BIN="$METADATA_DIR/release/nimbus"
-elif [ -f "target/release/nimbus" ]; then
-    PET_BIN="target/release/nimbus"
 else
-    if [ -f "/Users/jinliang/rust-target/release/nimbus" ]; then
-        PET_BIN="/Users/jinliang/rust-target/release/nimbus"
-    elif [ -f "/Users/jinliang/rust-target-nimbus/release/nimbus" ]; then
-        PET_BIN="/Users/jinliang/rust-target-nimbus/release/nimbus"
-    else
-        echo "❌ 未找到编译好的二进制文件！"
-        exit 1
-    fi
+    PET_BIN="target/release/nimbus"
+fi
+
+if [ ! -f "$PET_BIN" ]; then
+    echo "❌ 未找到当前编译的二进制文件：$PET_BIN"
+    exit 1
 fi
 
 echo "编译产物定位成功: $PET_BIN"

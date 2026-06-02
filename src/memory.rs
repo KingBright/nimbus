@@ -97,7 +97,7 @@ impl PetMemory {
         self.touch_count += 1;
         self.growth_points = self.growth_points.saturating_add(1);
         if self.touch_count == 3 || self.touch_count.is_multiple_of(8) {
-            self.remember_self_habit("被摸到云朵本体时，我会先确认这是互动，再做柔和回应。");
+            self.remember_self_habit("被摸到身体时，我会先确认这是互动，再做柔和回应。");
         }
         self.save();
     }
@@ -302,7 +302,10 @@ impl PetMemory {
         self.self_habits = self
             .self_habits
             .iter()
-            .map(|habit| clean_memory_line(habit))
+            .map(|habit| {
+                let cleaned = clean_memory_line(habit);
+                cleaned.replace("云朵本体", "身体").replace("云朵", "我")
+            })
             .filter(|habit| !habit.is_empty())
             .filter(|habit| seen_habits.insert(habit.clone()))
             .collect();
@@ -317,7 +320,7 @@ impl PetMemory {
             self.remember_self_habit("对方会主动和我聊天，我要延续前后的情绪和话题。");
         }
         if self.touch_count >= 3 {
-            self.remember_self_habit("被摸到云朵本体时，我会先确认这是互动，再做柔和回应。");
+            self.remember_self_habit("被摸到身体时，我会先确认这是互动，再做柔和回应。");
         }
         if self.dream_count >= 2 {
             self.remember_self_habit("睡着时我也会保留一点陪伴感，但梦话要轻，不打扰对方。");
@@ -341,7 +344,13 @@ impl PetMemory {
         self.recent_lines = self
             .recent_lines
             .iter()
-            .map(|line| clean_memory_line(line))
+            .map(|line| {
+                let cleaned = clean_memory_line(line);
+                cleaned
+                    .replace("云朵本体", "身体")
+                    .replace("小云朵", "我")
+                    .replace("云朵", "我")
+            })
             .filter(|line| !line.is_empty())
             .collect();
         let mut seen_lines = HashSet::new();

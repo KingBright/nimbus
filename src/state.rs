@@ -68,7 +68,7 @@ pub fn is_dev_app(app: &str) -> bool {
 
 #[cfg(test)]
 pub fn pet_visual_size(window_width: f64) -> f64 {
-    (window_width * 0.56).clamp(120.0, 280.0)
+    window_width * 0.56
 }
 
 #[cfg(test)]
