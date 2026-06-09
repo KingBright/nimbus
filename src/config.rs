@@ -29,6 +29,8 @@ pub struct AppConfig {
     pub pet_name: String,
     #[serde(default = "default_pet_style")]
     pub pet_style: String,
+    #[serde(default = "default_weather_mode")]
+    pub weather_mode: String,
 }
 
 fn default_persona() -> String {
@@ -55,6 +57,9 @@ fn default_pet_name() -> String {
 fn default_pet_style() -> String {
     "nimbus".to_string()
 }
+fn default_weather_mode() -> String {
+    "sunny".to_string()
+}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -76,6 +81,7 @@ impl Default for AppConfig {
             font_size: default_font_size(),
             pet_name: default_pet_name(),
             pet_style: default_pet_style(),
+            weather_mode: default_weather_mode(),
         }
     }
 }

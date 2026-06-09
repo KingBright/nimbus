@@ -306,6 +306,7 @@ impl LlamaEngine {
                         let max_tokens = 512;
                         let mut generated = 0;
                         let mut sampler = LlamaSampler::chain_simple([
+                            LlamaSampler::penalties(128, 1.15, 0.05, 0.03),
                             LlamaSampler::top_k(40),
                             LlamaSampler::top_p(0.95, 1),
                             LlamaSampler::temp(0.7),
@@ -461,7 +462,7 @@ impl LlamaEngine {
                             .map(|duration| duration.subsec_nanos())
                             .unwrap_or(42);
                         let mut sampler = LlamaSampler::chain_simple([
-                            LlamaSampler::penalties(64, 1.10, 0.05, 0.03),
+                            LlamaSampler::penalties(128, 1.25, 0.08, 0.05),
                             LlamaSampler::top_k(32),
                             LlamaSampler::top_p(0.92, 1),
                             LlamaSampler::temp(0.68),

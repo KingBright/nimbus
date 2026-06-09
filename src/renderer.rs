@@ -74,6 +74,7 @@ pub struct PetRenderer {
 
     // Multi-style customization
     pub active_style: String,
+    pub active_weather: String,
 
     // Hidden floating emotions
     pub happiness: f32,
@@ -135,6 +136,7 @@ impl PetRenderer {
             hover_lerp: 0.0,
             touch_lerp: 0.0,
             active_style: "nimbus".to_string(),
+            active_weather: "sunny".to_string(),
 
             happiness: 0.0,
             excitement: 0.0,
@@ -934,20 +936,56 @@ impl PetRenderer {
             }
             _ => {
                 // idle
-                target_eye_height = 1.0;
-                target_eye_width = 1.0;
-                target_top_lid = -1.0;
-                target_bottom_lid = 1.0;
-                target_pupil_scale = 0.56;
-                target_pupil_opacity = 1.0;
-                target_mouth_open = 0.0;
-                target_mouth_width = 1.4;
-                target_mouth_skew = 0.0;
-                target_body_scale_x = 1.0;
-                target_body_scale_y = 1.0;
-                target_body_shake = 0.0;
-                target_sleep_bubble = 0.0;
-                target_gaze_active = 1.0;
+                let loop_t = t % 20.0;
+                if self.active_style == "mochi" && (10.0..15.0).contains(&loop_t) {
+                    // 抹茶小猫在 10s-15s 是 舔爪状态
+                    target_eye_height = 1.0;
+                    target_eye_width = 1.0;
+                    target_top_lid = 0.38; // 眯眼/闭眼
+                    target_bottom_lid = 0.40;
+                    target_pupil_scale = 0.0;
+                    target_pupil_opacity = 0.0;
+                    // 嘴巴微张并伴随小猫舔爪子而急促颤动
+                    target_mouth_open = 0.15 + (t * 22.0).sin().abs() * 0.15;
+                    target_mouth_width = 0.8;
+                    target_mouth_skew = -0.15;
+                    target_body_scale_x = 0.98;
+                    target_body_scale_y = 0.96;
+                    target_body_shake = 0.0;
+                    target_sleep_bubble = 0.0;
+                    target_gaze_active = 0.0;
+                } else if self.active_style == "mochi" && (15.0..20.0).contains(&loop_t) {
+                    // 抹茶小猫在 15s-20s 是 洗脸/抓耳状态
+                    target_eye_height = 1.0;
+                    target_eye_width = 1.0;
+                    target_top_lid = 0.35; // 眯眼
+                    target_bottom_lid = 0.38;
+                    target_pupil_scale = 0.0;
+                    target_pupil_opacity = 0.0;
+                    target_mouth_open = 0.0;
+                    target_mouth_width = 1.0;
+                    target_mouth_skew = 0.0;
+                    target_body_scale_x = 1.0;
+                    target_body_scale_y = 1.0;
+                    target_body_shake = 0.0;
+                    target_sleep_bubble = 0.0;
+                    target_gaze_active = 0.0;
+                } else {
+                    target_eye_height = 1.0;
+                    target_eye_width = 1.0;
+                    target_top_lid = -1.0;
+                    target_bottom_lid = 1.0;
+                    target_pupil_scale = 0.56;
+                    target_pupil_opacity = 1.0;
+                    target_mouth_open = 0.0;
+                    target_mouth_width = 1.4;
+                    target_mouth_skew = 0.0;
+                    target_body_scale_x = 1.0;
+                    target_body_scale_y = 1.0;
+                    target_body_shake = 0.0;
+                    target_sleep_bubble = 0.0;
+                    target_gaze_active = 1.0;
+                }
             }
         }
 
@@ -1041,6 +1079,55 @@ impl PetRenderer {
         let mut pose_ty = settle_ty - hit * 0.055 + hold * 0.018 * live;
         let mut pose_rot = settle_rot - body_start * 0.62 + spring * 0.35 + hold * 0.08 * live;
         pose_ty -= breath_wave * 0.10;
+
+        // Mochi idle grooming cycle head movement
+        let is_mochi_idle = self.active_style == "mochi"
+            && (self.pet_state == "idle"
+                || (![
+                    "sleeping",
+                    "thinking",
+                    "tickled",
+                    "surprised",
+                    "bored",
+                    "muttering",
+                    "working",
+                    "tired",
+                ]
+                .contains(&self.pet_state.as_str())));
+        if is_mochi_idle {
+            let loop_t = t % 20.0;
+            if (10.0..15.0).contains(&loop_t) {
+                // 舔爪：向下低头，向左微偏
+                let lick_phase = (loop_t - 10.0) / 5.0;
+                let w = if lick_phase < 0.15 {
+                    lick_phase / 0.15
+                } else if lick_phase >= 0.85 {
+                    (1.0 - lick_phase) / 0.15
+                } else {
+                    1.0
+                };
+                pose_ty += w * 0.45;
+                pose_rot += w * 0.025;
+            } else if (15.0..20.0).contains(&loop_t) {
+                // 洗脸：随右爪划圈而上下左右微晃，向右偏头
+                let groom_phase = (loop_t - 15.0) / 5.0;
+                let w = if groom_phase < 0.15 {
+                    groom_phase / 0.15
+                } else if groom_phase >= 0.85 {
+                    (1.0 - groom_phase) / 0.15
+                } else {
+                    1.0
+                };
+                pose_ty += w * 0.15;
+                pose_rot += w * (-0.035 + (t * 7.5).cos() * 0.015);
+            }
+        }
+
+        // Nimbus windy weather shake
+        if self.active_style == "nimbus" && self.active_weather == "windy" {
+            pose_tx += (t * 12.0).sin() * 0.24;
+            pose_rot += (t * 8.0).cos() * 0.055;
+        }
 
         // Jitter (Shake) application for surprised
         if self.body_shake_lerp > 0.001 {
@@ -1302,24 +1389,90 @@ impl PetRenderer {
         // --- Render style-specific accessories / decor ---
         if style.name == "mochi" {
             // Draw Dynamic Paw Kneading (前爪交替踩奶动效)
-            let paw_speed = match self.pet_state.as_str() {
-                "sleeping" => 1.8,
-                "tickled" => 8.0,
-                "surprised" => 0.0,
-                _ => 3.5,
-            };
-            let paw_amp = match self.pet_state.as_str() {
-                "sleeping" => 0.06,
-                "tickled" => 0.65,
-                "surprised" => 0.0,
-                _ => 0.28,
-            };
+            let loop_t = t % 20.0;
+            let is_idle = self.pet_state == "idle"
+                || (![
+                    "sleeping",
+                    "thinking",
+                    "tickled",
+                    "surprised",
+                    "bored",
+                    "muttering",
+                    "working",
+                    "tired",
+                ]
+                .contains(&self.pet_state.as_str()));
 
-            let paw_l_dy = (anim_t * paw_speed).sin() * paw_amp * anim_amplitude;
-            let paw_r_dy = (anim_t * paw_speed + std::f32::consts::PI).sin() * paw_amp * anim_amplitude;
+            let mut paw_l_transform = body_transform;
+            let mut paw_r_transform = body_transform;
 
-            let paw_l_transform = body_transform.pre_translate(0.0, paw_l_dy);
-            let paw_r_transform = body_transform.pre_translate(0.0, paw_r_dy);
+            if is_idle && (10.0..15.0).contains(&loop_t) {
+                // 舔爪状态
+                let lick_phase = (loop_t - 10.0) / 5.0;
+                let w = if lick_phase < 0.15 {
+                    lick_phase / 0.15
+                } else if lick_phase >= 0.85 {
+                    (1.0 - lick_phase) / 0.15
+                } else {
+                    1.0
+                };
+
+                // 左爪抬起舔爪子，中点为 (10.2, 21.0)
+                let paw_l_tx = w * (10.5 - 10.2) + w * (t * 22.0).cos() * 0.12;
+                let paw_l_ty = w * (16.5 - 21.0) + w * (t * 18.0).sin() * 0.15;
+                let paw_l_rot = w * 0.22; // 微微倾斜
+                paw_l_transform = body_transform
+                    .pre_translate(10.2, 21.0)
+                    .pre_translate(paw_l_tx, paw_l_ty)
+                    .pre_rotate(paw_l_rot)
+                    .pre_translate(-10.2, -21.0);
+
+                // 右爪静止趴在默认位置
+            } else if is_idle && (15.0..20.0).contains(&loop_t) {
+                // 洗脸状态
+                let groom_phase = (loop_t - 15.0) / 5.0;
+                let w = if groom_phase < 0.15 {
+                    groom_phase / 0.15
+                } else if groom_phase >= 0.85 {
+                    (1.0 - groom_phase) / 0.15
+                } else {
+                    1.0
+                };
+
+                // 右前爪抬升至右眼和右耳上方 (17.5, 8.0) 处，随后大范围划沙子洗脸，中点为 (15.5, 21.0)
+                let circle_t = t * 7.5;
+                let groom_x = w * (17.5 - 15.5) + w * (circle_t.cos() * 1.5);
+                let groom_y = w * (11.0 - 21.0) + w * (circle_t.sin() * 2.5);
+                let paw_r_rot = -w * 0.4 + w * (circle_t.cos() * 0.2);
+                paw_r_transform = body_transform
+                    .pre_translate(15.5, 21.0)
+                    .pre_translate(groom_x, groom_y)
+                    .pre_rotate(paw_r_rot)
+                    .pre_translate(-15.5, -21.0);
+
+                // 左爪静止趴在默认位置
+            } else {
+                // 默认交替踩奶状态 (0s-10s)
+                let paw_speed = match self.pet_state.as_str() {
+                    "sleeping" => 1.8,
+                    "tickled" => 8.0,
+                    "surprised" => 0.0,
+                    _ => 3.5,
+                };
+                let paw_amp = match self.pet_state.as_str() {
+                    "sleeping" => 0.06,
+                    "tickled" => 0.65,
+                    "surprised" => 0.0,
+                    _ => 0.28,
+                };
+
+                let paw_l_dy = (anim_t * paw_speed).sin() * paw_amp * anim_amplitude;
+                let paw_r_dy =
+                    (anim_t * paw_speed + std::f32::consts::PI).sin() * paw_amp * anim_amplitude;
+
+                paw_l_transform = body_transform.pre_translate(0.0, paw_l_dy);
+                paw_r_transform = body_transform.pre_translate(0.0, paw_r_dy);
+            }
 
             let mut paw_fill_paint = Paint::default();
             paw_fill_paint.set_color(Color::from_rgba8(195, 235, 210, 255)); // 抹茶绿底部浅色
@@ -1344,8 +1497,15 @@ impl PetRenderer {
             left_stroke_pb.cubic_to(8.2, 24.2, 12.2, 24.2, 12.2, 21.0);
 
             if let (Some(fp), Some(sp)) = (left_fill_pb.finish(), left_stroke_pb.finish()) {
-                self.pixmap.fill_path(&fp, &paw_fill_paint, FillRule::Winding, paw_l_transform, None);
-                self.pixmap.stroke_path(&sp, &paw_stroke_paint, &paw_stroke, paw_l_transform, None);
+                self.pixmap.fill_path(
+                    &fp,
+                    &paw_fill_paint,
+                    FillRule::Winding,
+                    paw_l_transform,
+                    None,
+                );
+                self.pixmap
+                    .stroke_path(&sp, &paw_stroke_paint, &paw_stroke, paw_l_transform, None);
             }
 
             // 2. 右前爪 (x 范围约 13.5 到 17.5)
@@ -1359,8 +1519,15 @@ impl PetRenderer {
             right_stroke_pb.cubic_to(13.5, 24.2, 17.5, 24.2, 17.5, 21.0);
 
             if let (Some(fp), Some(sp)) = (right_fill_pb.finish(), right_stroke_pb.finish()) {
-                self.pixmap.fill_path(&fp, &paw_fill_paint, FillRule::Winding, paw_r_transform, None);
-                self.pixmap.stroke_path(&sp, &paw_stroke_paint, &paw_stroke, paw_r_transform, None);
+                self.pixmap.fill_path(
+                    &fp,
+                    &paw_fill_paint,
+                    FillRule::Winding,
+                    paw_r_transform,
+                    None,
+                );
+                self.pixmap
+                    .stroke_path(&sp, &paw_stroke_paint, &paw_stroke, paw_r_transform, None);
             }
 
             // Draw Cat Inner Ears (粉嫩内耳廓，适配立耳位置)
@@ -1655,10 +1822,9 @@ impl PetRenderer {
                     let cup1_cx = ctrl_x2 + if i < 3 { -0.3 } else { 0.3 };
                     let cup1_cy = ctrl_y2 - 0.2;
                     let cup_r = 0.55f32;
-                    if let Some(cup_rect) =
-                        Rect::from_xywh(cup1_cx - cup_r, cup1_cy - cup_r, cup_r * 2.0, cup_r * 2.0)
-                    {
-                        let cup_pb = PathBuilder::from_rect(cup_rect);
+                    let mut cup1_pb_builder = PathBuilder::new();
+                    cup1_pb_builder.push_circle(cup1_cx, cup1_cy, cup_r);
+                    if let Some(cup_pb) = cup1_pb_builder.finish() {
                         self.pixmap.fill_path(
                             &cup_pb,
                             &cup_paint,
@@ -1681,10 +1847,9 @@ impl PetRenderer {
                     // 吸盘 2 (末端前侧)
                     let cup2_cx = end_x + if i < 3 { -0.2 } else { 0.2 };
                     let cup2_cy = end_y - 1.2;
-                    if let Some(cup_rect) =
-                        Rect::from_xywh(cup2_cx - cup_r, cup2_cy - cup_r, cup_r * 2.0, cup_r * 2.0)
-                    {
-                        let cup_pb = PathBuilder::from_rect(cup_rect);
+                    let mut cup2_pb_builder = PathBuilder::new();
+                    cup2_pb_builder.push_circle(cup2_cx, cup2_cy, cup_r);
+                    if let Some(cup_pb) = cup2_pb_builder.finish() {
                         self.pixmap.fill_path(
                             &cup_pb,
                             &cup_paint,
@@ -1810,7 +1975,13 @@ impl PetRenderer {
                         anti_alias: true,
                         ..Default::default()
                     };
-                    self.pixmap.fill_path(&cp, &crown_paint, FillRule::Winding, crown_transform, None);
+                    self.pixmap.fill_path(
+                        &cp,
+                        &crown_paint,
+                        FillRule::Winding,
+                        crown_transform,
+                        None,
+                    );
 
                     let mut crown_stroke_paint = Paint::default();
                     crown_stroke_paint.set_color(Color::from_rgba8(200, 80, 20, 220)); // 橘红细边
@@ -1835,9 +2006,17 @@ impl PetRenderer {
             pearl_paint.anti_alias = true;
             let pearl_r = 0.45f32;
             for &(px, py) in &[(20.0f32, 1.8f32), (24.0f32, 0.8f32), (28.0f32, 1.8f32)] {
-                if let Some(pr) = Rect::from_xywh(px - pearl_r, py - pearl_r, pearl_r * 2.0, pearl_r * 2.0) {
+                if let Some(pr) =
+                    Rect::from_xywh(px - pearl_r, py - pearl_r, pearl_r * 2.0, pearl_r * 2.0)
+                {
                     let pp = PathBuilder::from_rect(pr);
-                    self.pixmap.fill_path(&pp, &pearl_paint, FillRule::Winding, crown_transform, None);
+                    self.pixmap.fill_path(
+                        &pp,
+                        &pearl_paint,
+                        FillRule::Winding,
+                        crown_transform,
+                        None,
+                    );
                 }
             }
 
@@ -1862,62 +2041,262 @@ impl PetRenderer {
             // 左侧星 (x=6.5, y=9.5)
             if let Some(sp_l) = build_four_star(6.5, 9.5 + star_dy_l, 1.25) {
                 let mut p_paint = Paint::default();
-                p_paint.set_color(Color::from_rgba8(255, 255, 255, (255.0 * star_fade_l) as u8));
+                p_paint.set_color(Color::from_rgba8(
+                    255,
+                    255,
+                    255,
+                    (255.0 * star_fade_l) as u8,
+                ));
                 p_paint.anti_alias = true;
-                self.pixmap.fill_path(&sp_l, &p_paint, FillRule::Winding, body_transform, None);
+                self.pixmap
+                    .fill_path(&sp_l, &p_paint, FillRule::Winding, body_transform, None);
             }
             // 右侧星 (x=41.5, y=12.5)
             if let Some(sp_r) = build_four_star(41.5, 12.5 + star_dy_r, 1.25) {
                 let mut p_paint = Paint::default();
-                p_paint.set_color(Color::from_rgba8(255, 255, 255, (255.0 * star_fade_r) as u8));
+                p_paint.set_color(Color::from_rgba8(
+                    255,
+                    255,
+                    255,
+                    (255.0 * star_fade_r) as u8,
+                ));
                 p_paint.anti_alias = true;
-                self.pixmap.fill_path(&sp_r, &p_paint, FillRule::Winding, body_transform, None);
+                self.pixmap
+                    .fill_path(&sp_r, &p_paint, FillRule::Winding, body_transform, None);
             }
         }
 
         if style.name == "nimbus" {
-            // 1. Draw Falling Raindrops (淅淅沥沥下落的小雨滴)
-            let build_drop_path = |cx: f32, cy: f32, r: f32| -> Option<tiny_skia::Path> {
-                let mut pb = PathBuilder::new();
-                pb.move_to(cx, cy - r * 1.4);
-                pb.cubic_to(cx + r, cy - r * 0.5, cx + r, cy + r, cx, cy + r);
-                pb.cubic_to(cx - r, cy + r, cx - r, cy - r * 0.5, cx, cy - r * 1.4);
-                pb.close();
-                pb.finish()
-            };
+            // 根据 active_weather 来选择渲染气象粒子
+            match self.active_weather.as_str() {
+                "sunny" => {
+                    let sun_cx = 35.0f32;
+                    let sun_cy = 5.0f32;
+                    let mut sun_paint = Paint::default();
+                    sun_paint.set_color(Color::from_rgba8(255, 215, 0, 240)); // 亮金
+                    sun_paint.anti_alias = true;
 
-            let drop_y_start = 23.0f32;
-            let drop_y_end = 30.5f32;
-            let drop_range = drop_y_end - drop_y_start;
+                    // 画太阳核心
+                    let mut sun_pb = PathBuilder::new();
+                    sun_pb.push_circle(sun_cx, sun_cy, 2.5);
+                    if let Some(sun_path) = sun_pb.finish() {
+                        self.pixmap.fill_path(
+                            &sun_path,
+                            &sun_paint,
+                            FillRule::Winding,
+                            body_transform,
+                            None,
+                        );
+                    }
 
-            for i in 0..2 {
-                let phase_offset = if i == 0 { 0.0f32 } else { 0.5f32 };
-                let drop_t = (t * 1.4 + phase_offset) % 1.0;
-                let fade = 1.0 - drop_t;
+                    // 画 4 道暖日晕光茫
+                    let mut ray_paint = Paint::default();
+                    ray_paint.set_color(Color::from_rgba8(255, 235, 120, 180)); // 亮黄半透明
+                    ray_paint.anti_alias = true;
+                    for i in 0..4 {
+                        let angle = (i as f32) * std::f32::consts::FRAC_PI_2 + t * 0.4;
+                        let dx = angle.cos();
+                        let dy = angle.sin();
+                        // 光芒线段的起点和终点
+                        let start_dist = 3.5f32;
+                        let end_dist = 5.8f32;
+                        let x1 = sun_cx + dx * start_dist;
+                        let y1 = sun_cy + dy * start_dist;
+                        let x2 = sun_cx + dx * end_dist;
+                        let y2 = sun_cy + dy * end_dist;
 
-                let drop_x = if i == 0 { 16.0f32 } else { 32.0f32 } + (t * 2.2 + i as f32 * 1.8).sin() * 0.40;
-                let drop_y = drop_y_start + drop_t * drop_range;
-                let drop_r = 0.52 * fade;
-
-                if let Some(dp) = build_drop_path(drop_x, drop_y, drop_r) {
-                    let mut d_paint = Paint::default();
-                    d_paint.set_color(Color::from_rgba8(130, 195, 255, (160.0 * fade) as u8));
-                    d_paint.anti_alias = true;
-                    self.pixmap.fill_path(&dp, &d_paint, FillRule::Winding, body_transform, None);
-
-                    let mut d_stroke_paint = Paint::default();
-                    d_stroke_paint.set_color(Color::from_rgba8(255, 255, 255, (170.0 * fade) as u8));
-                    d_stroke_paint.anti_alias = true;
-                    self.pixmap.stroke_path(
-                        &dp,
-                        &d_stroke_paint,
-                        &Stroke {
-                            width: 0.22,
-                            ..Default::default()
-                        },
-                        body_transform,
-                        None,
+                        let mut ray_pb = PathBuilder::new();
+                        ray_pb.move_to(x1, y1);
+                        ray_pb.line_to(x2, y2);
+                        if let Some(ray_path) = ray_pb.finish() {
+                            self.pixmap.stroke_path(
+                                &ray_path,
+                                &ray_paint,
+                                &Stroke {
+                                    width: 0.8,
+                                    ..Default::default()
+                                },
+                                body_transform,
+                                None,
+                            );
+                        }
+                    }
+                }
+                "windy" => {
+                    // 风线 1
+                    let mut wind_pb = PathBuilder::new();
+                    let y1_offset = (t * 4.0).sin() * 0.6;
+                    wind_pb.move_to(8.0, 24.0 + y1_offset);
+                    wind_pb.cubic_to(
+                        18.0,
+                        22.0 - y1_offset,
+                        28.0,
+                        26.0 + y1_offset,
+                        40.0,
+                        24.0 - y1_offset,
                     );
+                    // 风线 2
+                    let mut wind_pb2 = PathBuilder::new();
+                    let y2_offset = (t * 4.0 + 2.0).sin() * 0.5;
+                    wind_pb2.move_to(6.0, 26.5 + y2_offset);
+                    wind_pb2.cubic_to(
+                        16.0,
+                        28.5 - y2_offset,
+                        26.0,
+                        24.5 + y2_offset,
+                        38.0,
+                        26.5 - y2_offset,
+                    );
+
+                    let mut wind_paint = Paint::default();
+                    wind_paint.set_color(Color::from_rgba8(240, 248, 255, 120)); // 爱丽丝蓝
+                    wind_paint.anti_alias = true;
+                    let wind_stroke = Stroke {
+                        width: 0.45,
+                        ..Default::default()
+                    };
+                    if let Some(wp1) = wind_pb.finish() {
+                        self.pixmap.stroke_path(
+                            &wp1,
+                            &wind_paint,
+                            &wind_stroke,
+                            body_transform,
+                            None,
+                        );
+                    }
+                    if let Some(wp2) = wind_pb2.finish() {
+                        self.pixmap.stroke_path(
+                            &wp2,
+                            &wind_paint,
+                            &wind_stroke,
+                            body_transform,
+                            None,
+                        );
+                    }
+                }
+                "snowy" => {
+                    let build_snowflake_path = || -> Option<tiny_skia::Path> {
+                        let mut pb = PathBuilder::new();
+                        // 三条交叉的线段
+                        pb.move_to(-0.7, 0.0);
+                        pb.line_to(0.7, 0.0);
+                        pb.move_to(0.0, -0.7);
+                        pb.line_to(0.0, 0.7);
+                        // 对角线 1
+                        pb.move_to(-0.5, -0.5);
+                        pb.line_to(0.5, 0.5);
+                        // 对角线 2
+                        pb.move_to(-0.5, 0.5);
+                        pb.line_to(0.5, -0.5);
+                        pb.finish()
+                    };
+
+                    let snow_y_start = 23.0f32;
+                    let snow_y_end = 32.0f32;
+                    let snow_range = snow_y_end - snow_y_start;
+                    for i in 0..2 {
+                        let phase_offset = if i == 0 { 0.0f32 } else { 0.5f32 };
+                        let snow_t = (t * 0.6 + phase_offset) % 1.0;
+                        let fade = 1.0 - snow_t;
+
+                        let drift = (t * 2.0 + i as f32 * std::f32::consts::PI).cos() * 1.2;
+                        let snow_x = if i == 0 { 18.0f32 } else { 30.0f32 } + drift;
+                        let snow_y = snow_y_start + snow_t * snow_range;
+                        let snow_r = 1.0 * fade; // 越往下越小
+
+                        let snow_rot = t * 1.5 + i as f32 * 0.8; // 缓缓旋转
+
+                        if let Some(sp) = build_snowflake_path() {
+                            let mut s_paint = Paint::default();
+                            s_paint.set_color(Color::from_rgba8(
+                                255,
+                                255,
+                                255,
+                                (230.0 * fade) as u8,
+                            ));
+                            s_paint.anti_alias = true;
+
+                            // 构造变换
+                            let snow_transform = body_transform
+                                .pre_translate(snow_x, snow_y)
+                                .pre_scale(snow_r, snow_r)
+                                .pre_rotate(snow_rot);
+
+                            self.pixmap.stroke_path(
+                                &sp,
+                                &s_paint,
+                                &Stroke {
+                                    width: 0.35,
+                                    ..Default::default()
+                                },
+                                snow_transform,
+                                None,
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    // "rainy" 细雨或默认
+                    let build_drop_path = |cx: f32, cy: f32, r: f32| -> Option<tiny_skia::Path> {
+                        let mut pb = PathBuilder::new();
+                        pb.move_to(cx, cy - r * 1.4);
+                        pb.cubic_to(cx + r, cy - r * 0.5, cx + r, cy + r, cx, cy + r);
+                        pb.cubic_to(cx - r, cy + r, cx - r, cy - r * 0.5, cx, cy - r * 1.4);
+                        pb.close();
+                        pb.finish()
+                    };
+
+                    let drop_y_start = 23.0f32;
+                    let drop_y_end = 30.5f32;
+                    let drop_range = drop_y_end - drop_y_start;
+
+                    for i in 0..2 {
+                        let phase_offset = if i == 0 { 0.0f32 } else { 0.5f32 };
+                        let drop_t = (t * 1.4 + phase_offset) % 1.0;
+                        let fade = 1.0 - drop_t;
+
+                        let drop_x = if i == 0 { 16.0f32 } else { 32.0f32 }
+                            + (t * 2.2 + i as f32 * 1.8).sin() * 0.40;
+                        let drop_y = drop_y_start + drop_t * drop_range;
+                        let drop_r = 0.52 * fade;
+
+                        if let Some(dp) = build_drop_path(drop_x, drop_y, drop_r) {
+                            let mut d_paint = Paint::default();
+                            d_paint.set_color(Color::from_rgba8(
+                                130,
+                                195,
+                                255,
+                                (160.0 * fade) as u8,
+                            ));
+                            d_paint.anti_alias = true;
+                            self.pixmap.fill_path(
+                                &dp,
+                                &d_paint,
+                                FillRule::Winding,
+                                body_transform,
+                                None,
+                            );
+
+                            let mut d_stroke_paint = Paint::default();
+                            d_stroke_paint.set_color(Color::from_rgba8(
+                                255,
+                                255,
+                                255,
+                                (170.0 * fade) as u8,
+                            ));
+                            d_stroke_paint.anti_alias = true;
+                            self.pixmap.stroke_path(
+                                &dp,
+                                &d_stroke_paint,
+                                &Stroke {
+                                    width: 0.22,
+                                    ..Default::default()
+                                },
+                                body_transform,
+                                None,
+                            );
+                        }
+                    }
                 }
             }
 
@@ -1939,7 +2318,13 @@ impl PetRenderer {
                     let mut bolt_paint = Paint::default();
                     bolt_paint.set_color(Color::from_rgba8(255, 230, 30, 245));
                     bolt_paint.anti_alias = true;
-                    self.pixmap.fill_path(&bp, &bolt_paint, FillRule::Winding, body_transform, None);
+                    self.pixmap.fill_path(
+                        &bp,
+                        &bolt_paint,
+                        FillRule::Winding,
+                        body_transform,
+                        None,
+                    );
 
                     let mut bolt_stroke_paint = Paint::default();
                     bolt_stroke_paint.set_color(Color::from_rgba8(220, 110, 10, 240));
@@ -2602,8 +2987,8 @@ impl PetRenderer {
             let cy = by + bh / 2.0;
             let rx = bw / 2.0;
             let ry = bh / 2.0;
-            let kx = rx * 0.55228475;
-            let ky = ry * 0.55228475;
+            let kx = rx * 0.552_284_8;
+            let ky = ry * 0.552_284_8;
             pb.move_to(cx - rx, cy);
             pb.cubic_to(cx - rx, cy - ky, cx - kx, cy - ry, cx, cy - ry);
             pb.cubic_to(cx + kx, cy - ry, cx + rx, cy - ky, cx + rx, cy);
