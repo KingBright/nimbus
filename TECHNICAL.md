@@ -73,38 +73,38 @@ $$\mathbf{S}_{curr} \leftarrow \mathbf{S}_{curr} + (\mathbf{S}_{target} - \mathb
 
 ---
 
-## 🧠 4. 级联式智能状态决策引擎 (Cascaded Decision Engine)
+## 🧠 4. 模型行为层与稳定状态机
 
-系统采用状态优先级级联决策器，每个时钟周期按严格的优先级链评估 `pet_state`。状态决策伪代码如下：
+系统先把启动、触摸、自言自语、梦话、形态变化等输入建模为 `BehaviorEvent`。事件 prompt 会结合当前形态、人格、天气、应用、成长记忆和近期表达；不合格输出最多进行两次不携带完整旧 prompt 的短事件重试，避免 1B 模型重复或沉默。
+
+视觉状态由独立的稳定状态机决定。候选状态必须持续达到对应延迟后才提交，因此单帧命中噪声不会让宠物在睡眠、触摸和待机之间跳变。模型 context 是否驻留只属于资源状态，不再控制宠物睡眠。
 
 ```rust
-if surprised_timer.active() {
-    state = "surprised"; // 优先级 1：受惊（晃鼠标过快或拖拽松手，持续 1.5 秒）
-} else if is_pointer_on_pet {
-    state = "tickled";   // 优先级 2：抚摸贴贴（鼠标直接悬停在云朵像素体内）
-} else if is_muttering {
-    if in_thinking_block {
-        state = "thinking"; // 优先级 3：流式思考（大模型在生成思考段落）
-    } else {
-        state = "muttering"; // 优先级 4：自言自语（大模型在输出回复正文）
-    }
-} else if pointer_inside_window {
-    state = "attentive"; // 优先级 5：专注盯着鼠标（鼠标移入透明窗口内）
-} else if !llama_engine.is_online() {
-    state = "sleeping";  // 优先级 6：显存释放休眠（大模型闲置超时被移出 VRAM）
+let target = if surprised_timer.active() {
+    PetState::Surprised
+} else if rendered_body_mask.contains(global_pointer) {
+    PetState::Tickled
+} else if active_event == Dream {
+    PetState::Sleeping
+} else if model_generation.active() {
+    model_generation.is_waiting()
+        ? PetState::Thinking
+        : PetState::Muttering
+} else if user_idle > 15 minutes {
+    PetState::Sleeping
+} else if user_idle > 90 seconds {
+    PetState::Bored
+} else if active_app.is_development_tool() {
+    PetState::Working
+} else if night_time(23:00 - 05:00) {
+    PetState::Tired
 } else {
-    // 场景级联判定
-    let idle_duration = now - last_interactive_time;
-    if idle_duration > 90 seconds {
-        state = "bored"; // 优先级 7：无聊挂机发呆
-    } else if active_app.is_development_tool() {
-        state = "working"; // 优先级 8：陪伴敲代码工作
-    } else if night_time(23:00 - 05:00) {
-        state = "tired";   // 优先级 9：深夜困倦
-    } else {
-        state = "idle";    // 优先级 10：常规闲置待机
-    }
-}
+    PetState::Idle
+};
+
+state = state_machine.commit_after_delay(target);
 ```
 
-这套级联系统完美融合了**时间上下文**、**工作习惯上下文**、**大模型资源上下文**与**实时鼠标手势交互**，提供了无缝衔接的多维度交互体验。
+短行为推理使用 512-token context、512-token batch 和 128-token micro-batch。实测 MiniCPM5 1B 的短句 KV Cache 为 12 MiB、Metal 计算缓冲约 64.5 MiB；模型权重本身约 651 MiB，会继续常驻映射以避免每次互动重新加载。
+
+主窗口把配置尺寸视为宠物的名义视觉尺寸，而不是透明窗口宽度。普通形态使用约 `88% × 50%` 的紧凑窗口，云朵为睡眠特效保留少量额外高度；渲染倍率同步补偿，因此收紧窗口不会缩小宠物。气泡窗口从 cosmic-text 的 `line_top + line_height` 计算真实行盒，再加入必要的文字内边距、尾巴和阴影安全区，避免基线重复计入高度造成底部空白。

@@ -7,7 +7,15 @@ use winit::{
     window::WindowBuilder,
 };
 
+const PET_WINDOW_WIDTH_RATIO: f64 = 0.88;
+const PET_WINDOW_HEIGHT_RATIO: f64 = 0.50;
+const NIMBUS_WINDOW_HEIGHT_RATIO: f64 = 0.54;
+const BUBBLE_INITIAL_WIDTH: u32 = 100;
+const BUBBLE_INITIAL_HEIGHT: u32 = 64;
+
+mod activity;
 mod art;
+mod behavior;
 mod config;
 mod desktop;
 mod placement;
@@ -15,12 +23,18 @@ mod storage;
 mod llama_engine;
 mod memory;
 mod renderer;
+mod state;
 mod think_filter;
 
+use activity::observe_user_activity;
+use behavior::{
+    build_behavior_prompt, clean_behavior_line, jittered_interval, BehaviorContext, BehaviorEvent,
+};
 use config::AppConfig;
 use llama_engine::LlamaEngine;
 use memory::PetMemory;
 use renderer::PetRenderer;
+use state::{decide_state, PetState, StateContext, StateMachine};
 use tray_icon::{
     menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
     TrayIconBuilder,
@@ -426,6 +440,57 @@ fn sync_renderer_to_window(
     size
 }
 
+fn pet_window_logical_size(nominal_size: u32, pet_style: &str) -> (u32, u32) {
+    let width = (nominal_size as f64 * PET_WINDOW_WIDTH_RATIO)
+        .round()
+        .max(1.0) as u32;
+    let height = if pet_style == "nimbus" {
+        (nominal_size as f64 * NIMBUS_WINDOW_HEIGHT_RATIO)
+            .round()
+            .max(1.0) as u32
+    } else {
+        (nominal_size as f64 * PET_WINDOW_HEIGHT_RATIO)
+            .round()
+            .max(1.0) as u32
+    };
+    (width, height)
+}
+
+fn resize_pet_window(
+    window: &winit::window::Window,
+    wgpu_state: &mut WgpuState,
+    renderer: &mut PetRenderer,
+    nominal_size: u32,
+    pet_style: &str,
+    font_size: f32,
+) {
+    let (logical_width, logical_height) = pet_window_logical_size(nominal_size, pet_style);
+    let scale = window.scale_factor();
+    let old_size = window.inner_size();
+    let old_position = window.outer_position().ok();
+    let fallback_size = winit::dpi::PhysicalSize::new(
+        (logical_width as f64 * scale).round().max(1.0) as u32,
+        (logical_height as f64 * scale).round().max(1.0) as u32,
+    );
+    let target_size = window
+        .request_inner_size(winit::dpi::LogicalSize::new(
+            logical_width as f64,
+            logical_height as f64,
+        ))
+        .unwrap_or(fallback_size);
+
+    if let Some(old_position) = old_position {
+        let x = old_position.x + (old_size.width as i32 - target_size.width as i32) / 2;
+        let y = old_position.y + old_size.height as i32 - target_size.height as i32;
+        window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+    }
+
+    wgpu_state.resize(target_size.width.max(1), target_size.height.max(1));
+    renderer.scale_factor = scale as f32;
+    renderer.resize(target_size.width.max(1), target_size.height.max(1));
+    renderer.set_font_size(font_size);
+}
+
 fn set_pet_pointer_from_physical(
     renderer: &mut PetRenderer,
     window_size: winit::dpi::PhysicalSize<u32>,
@@ -435,33 +500,6 @@ fn set_pet_pointer_from_physical(
     renderer.set_mouse_position(Some((x as f32, y as f32)));
     renderer.pointer_x = x as f32 / (window_size.width.max(1) as f32 / 24.0);
     renderer.pointer_y = y as f32 / (window_size.height.max(1) as f32 / 24.0);
-}
-
-// User Activity Observer: Runs AppleScript to fetch frontmost app name and current hour
-async fn observe_user_activity() -> (String, u32) {
-    let output = tokio::process::Command::new("osascript")
-        .arg("-e")
-        .arg("tell application \"System Events\" to get name of first process whose frontmost is true")
-        .arg("-e")
-        .arg("get hours of (current date)")
-        .output()
-        .await;
-
-    match output {
-        Ok(out) => {
-            let combined = String::from_utf8_lossy(&out.stdout).to_string();
-            let mut lines = combined.lines();
-            let app_name = lines.next().unwrap_or("未知应用").trim().to_string();
-            let hour = lines
-                .next()
-                .unwrap_or("12")
-                .trim()
-                .parse::<u32>()
-                .unwrap_or(12);
-            (app_name, hour)
-        }
-        Err(_) => ("未知应用".to_string(), 12),
-    }
 }
 
 // Pseudo-random index selector without rand dependency
@@ -529,11 +567,22 @@ const CRAB_GENERIC_LINES: &[&str] = &[
     "小泡泡从蟹壳边冒出来。",
 ];
 
+const LUMA_TOUCH_LINES: &[&str] = &[
+    "长耳朵轻轻靠过来，碰到你啦。",
+    "圆尾巴晃了一下，我又挨近一点。",
+    "月牙光纹被摸得亮了一小圈。",
+];
+const LUMA_GENERIC_LINES: &[&str] = &[
+    "我抖抖长耳朵，接住一小片月光。",
+    "圆尾巴轻轻一晃，我又蹦近了一点。",
+    "胸前的月牙光纹悄悄亮起来。",
+];
+
 fn style_speech_profile(pet_style: &str) -> StyleSpeechProfile {
     match pet_style {
         "mochi" => StyleSpeechProfile {
-            startup_line: "抹茶小猫伸了个懒腰，耳朵轻轻竖起来。",
-            switch_line: "外观已切到抹茶小猫，耳朵轻轻竖起来。",
+            startup_line: "我醒啦，竖起耳朵，今天也在这里陪你。",
+            switch_line: "耳朵轻轻竖起来，我正在熟悉这副小猫身体。",
             touch_note: "我会记住对方触碰猫耳和爪爪时更喜欢柔和、轻一点的反应。",
             touch_lines: MOCHI_TOUCH_LINES,
             sleep_line: "夜深了，小猫把尾巴圈起来，安静陪着你。",
@@ -543,8 +592,8 @@ fn style_speech_profile(pet_style: &str) -> StyleSpeechProfile {
             generic_lines: MOCHI_GENERIC_LINES,
         },
         "starlit" => StyleSpeechProfile {
-            startup_line: "星光章鱼慢慢醒来，触角舒展开。",
-            switch_line: "外观已切到星光章鱼，触角慢慢舒展开。",
+            startup_line: "我醒啦，舒展触角，今天也在这里陪你。",
+            switch_line: "触角慢慢舒展开，我正在熟悉这副星光身体。",
             touch_note: "我会记住对方触碰触角时更喜欢柔和、轻一点的反应。",
             touch_lines: STARLIT_TOUCH_LINES,
             sleep_line: "夜深了，星光章鱼抱住小星泡，安静陪着你。",
@@ -554,8 +603,8 @@ fn style_speech_profile(pet_style: &str) -> StyleSpeechProfile {
             generic_lines: STARLIT_GENERIC_LINES,
         },
         "crab" => StyleSpeechProfile {
-            startup_line: "小螃蟹活动一下大螯，安静上线。",
-            switch_line: "外观已切到红螯小螃蟹，大螯咔嚓轻响。",
+            startup_line: "我醒啦，活动一下大螯，今天也在这里陪你。",
+            switch_line: "大螯咔嚓轻响，我正在熟悉这副小螃蟹身体。",
             touch_note: "我会记住对方触碰蟹壳和大螯时更喜欢柔和、轻一点的反应。",
             touch_lines: CRAB_TOUCH_LINES,
             sleep_line: "夜深了，小螃蟹把大螯收近一点，安静陪着你。",
@@ -564,9 +613,20 @@ fn style_speech_profile(pet_style: &str) -> StyleSpeechProfile {
             chat_line: "小螃蟹晃晃大螯，安静等你聊完。",
             generic_lines: CRAB_GENERIC_LINES,
         },
+        "luma" => StyleSpeechProfile {
+            startup_line: "我醒啦，抖抖长耳朵，今天也在这里陪你。",
+            switch_line: "长耳朵慢慢竖起来，我正在熟悉这副月灯兔身体。",
+            touch_note: "我会记住对方触碰长耳朵和月牙光纹时更喜欢柔和、轻一点的反应。",
+            touch_lines: LUMA_TOUCH_LINES,
+            sleep_line: "夜深了，我把长耳朵放松下来，抱着一点月光陪你。",
+            work_line: "我收好圆尾巴，安静蹲在一旁陪你写代码。",
+            browser_line: "我抖抖长耳朵，提醒你让眼睛歇一下。",
+            chat_line: "月牙光纹轻轻亮着，我安静等你聊完。",
+            generic_lines: LUMA_GENERIC_LINES,
+        },
         _ => StyleSpeechProfile {
-            startup_line: "小云朵轻轻醒来，身体慢慢漂起来。",
-            switch_line: "外观已切到粉蓝小云朵，身体轻轻漂起来。",
+            startup_line: "我醒啦，轻轻漂过来，今天也在这里陪你。",
+            switch_line: "身体轻轻漂起来，我正在熟悉这副云朵身体。",
             touch_note: "我会记住对方触碰云朵身体时更喜欢柔和、轻一点的反应。",
             touch_lines: NIMBUS_TOUCH_LINES,
             sleep_line: "夜深了，小云朵收起光边，安静陪着你。",
@@ -582,55 +642,6 @@ fn startup_fallback_line(pet_style: &str) -> &'static str {
     style_speech_profile(pet_style).startup_line
 }
 
-fn startup_style_context(pet_style: &str, weather_mode: &str) -> String {
-    let body = match pet_style {
-        "mochi" => "当前外观是抹茶小猫；用猫耳、爪爪、尾巴或轻轻醒来的动作回应。",
-        "starlit" => "当前外观是星光章鱼；用触角、星泡、皇冠或漂浮醒来的动作回应。",
-        "crab" => "当前外观是红螯小螃蟹；用蟹壳、大螯、横着挪步或吐泡泡的动作回应。",
-        _ => "当前外观是粉蓝小云朵；用漂浮、软软醒来或轻轻晃动的动作回应。",
-    };
-    format!("{body} 当前天气模式是 {weather_mode}。")
-}
-
-fn build_startup_prompt(memory_desc: &str, pet_style: &str, weather_mode: &str) -> String {
-    let startup_context = startup_style_context(pet_style, weather_mode);
-    let memory_desc = sanitize_startup_memory_desc(memory_desc);
-    format!(
-        "{} {} 你刚刚随桌宠窗口启动，正在醒来。开场像自然醒来的片刻，以身体动作、周围观察或很短的情绪为主；不像自我介绍，也不提名字。只说台词本身，最多十八个字。",
-        startup_context, memory_desc
-    )
-}
-
-fn sanitize_startup_memory_desc(memory_desc: &str) -> String {
-    memory_desc
-        .replace("Nimbus", "旧称呼")
-        .replace("NIMBUS", "旧称呼")
-        .replace("nimbus", "旧称呼")
-        .replace("灵霓", "旧称呼")
-}
-
-fn clean_startup_line(raw: &str, pet_style: &str) -> String {
-    raw.lines()
-        .map(|line| {
-            line.trim()
-                .trim_matches(['"', '“', '”', '\'', '。', '，', ',', ' ', '　'])
-        })
-        .filter(|line| !line.is_empty())
-        .filter(|line| !startup_line_is_unsuitable(line, pet_style))
-        .map(|line| line.chars().take(24).collect::<String>())
-        .next()
-        .unwrap_or_else(|| startup_fallback_line(pet_style).to_string())
-}
-
-fn startup_line_is_unsuitable(text: &str, pet_style: &str) -> bool {
-    text.contains("动作")
-        || text.contains("台词")
-        || text.contains("设定")
-        || contains_legacy_pet_name(text)
-        || is_startup_self_intro(text)
-        || style_identity_leaks(text, pet_style)
-}
-
 fn contains_legacy_pet_name(text: &str) -> bool {
     text.to_lowercase().contains("nimbus") || text.contains("灵霓")
 }
@@ -643,75 +654,6 @@ fn pet_name_prompt_suffix(pet_name: &str) -> String {
         format!("，名字叫{pet_name}")
     }
 }
-
-fn is_startup_self_intro(text: &str) -> bool {
-    let key: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    if key.starts_with("我是被") {
-        return false;
-    }
-    key.starts_with("我是")
-        || key.starts_with("我叫")
-        || key.contains("我是桌宠")
-        || key.contains("我的名字")
-        || key.contains("名字是")
-        || key.contains("叫我")
-}
-
-fn style_identity_leaks(text: &str, pet_style: &str) -> bool {
-    let t = text.to_lowercase();
-    match pet_style {
-        "crab" => t.contains("云") || t.contains("猫") || t.contains("喵") || t.contains("章鱼") || t.contains("触角") || t.contains("触手"),
-        "mochi" => t.contains("螃蟹") || t.contains("螯") || t.contains("云") || t.contains("章鱼") || t.contains("触角") || t.contains("触手"),
-        "starlit" => t.contains("螃蟹") || t.contains("螯") || t.contains("猫") || t.contains("喵") || t.contains("云"),
-        _ => t.contains("螃蟹") || t.contains("螯") || t.contains("猫") || t.contains("喵") || t.contains("章鱼") || t.contains("触角") || t.contains("触手"),
-    }
-}
-
-fn clean_mutter_line(raw: &str, pet_style: &str, fallback: &str) -> String {
-    raw.lines()
-        .map(|line| {
-            line.trim()
-                .trim_matches(['"', '“', '”', '\'', '。', '，', ',', ' ', '　'])
-        })
-        .filter(|line| !line.is_empty())
-        .filter(|line| !mutter_line_is_unsuitable(line, pet_style))
-        .map(|line| line.chars().take(24).collect::<String>())
-        .next()
-        .unwrap_or_else(|| fallback.to_string())
-}
-
-fn mutter_line_is_unsuitable(text: &str, pet_style: &str) -> bool {
-    text.contains("动作")
-        || text.contains("台词")
-        || text.contains("设定")
-        || text.contains("提示词")
-        || text.contains("回复")
-        || contains_legacy_pet_name(text)
-        || is_startup_self_intro(text)
-        || style_identity_leaks(text, pet_style)
-        || has_too_many_english_or_repeats(text)
-}
-
-fn has_too_many_english_or_repeats(text: &str) -> bool {
-    if text.contains('/') || text.contains('\\') {
-        return true;
-    }
-    let text_lower = text.to_lowercase();
-    let repeats = ["hi", "hello", "crunch", "嗝", "嘟", "哈"];
-    for r in repeats {
-        if text_lower.matches(r).count() >= 2 {
-            return true;
-        }
-    }
-    let alpha_count = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
-    let chinese_count = text.chars().filter(|c| (0x4e00..=0x9fa5).contains(&(*c as u32))).count();
-    if alpha_count > 0 && chinese_count == 0 {
-        return true;
-    }
-    false
-}
-
-
 fn style_switch_line(pet_style: &str) -> &'static str {
     style_speech_profile(pet_style).switch_line
 }
@@ -738,6 +680,10 @@ fn weather_feedback_line(pet_style: &str, weather_mode: &str) -> &'static str {
         ("starlit", "windy") => "风把星泡吹远了，我慢慢漂回来。",
         ("starlit", "rainy") => "雨点敲着星泡，咕噜噜地响。",
         ("starlit", "snowy") => "雪花绕着皇冠转了一圈。",
+        ("luma", "sunny") => "暖光落在长耳朵上，月牙纹也亮了一点。",
+        ("luma", "windy") => "风从耳尖掠过，我轻轻抖了抖耳朵。",
+        ("luma", "rainy") => "雨声落下来，我把圆尾巴收近一点。",
+        ("luma", "snowy") => "雪花停在耳尖，我捧住一小点冷光。",
         (_, "windy") => "风吹过来，我轻轻晃了一下。",
         (_, "rainy") => "雨声细细落下，我安静陪着你。",
         (_, "snowy") => "雪花慢慢飘下来了，空气变得很轻。",
@@ -815,6 +761,7 @@ fn get_persona_prompt(
         "mochi" => "你当前的外观是一只软萌的抹茶小猫，耳朵尖尖，适合用喵呜、舔爪、摇尾巴这类身体经验来回应。".to_string(),
         "starlit" => "你当前的外观是一只梦幻的紫色太空章鱼，头上戴着星光皇冠，适合用触角、星泡、漂浮和闪烁星光这类身体经验来回应。".to_string(),
         "crab" => "你当前的外观是一只神气活现的红色小螃蟹，长着一对大螯钳，适合用咔嚓轻响、挥动大螯、横着走路、吐泡泡这类身体经验来回应；如果旧记忆里出现其他旧外观称呼，把它理解为过去造型，不主动沿用。".to_string(),
+        "luma" => "你当前的外观是一只柔软灵动的月灯兔，长耳朵、圆尾巴和胸前的月牙光纹都属于你，适合用抖耳朵、轻轻蹦跳、靠近指尖和捧住月光这类身体经验来回应；如果旧记忆里出现其他旧外观称呼，把它理解为过去造型，不主动沿用。".to_string(),
         "nimbus" => "你当前的外观是一只雪白蓬松的云朵精灵，像一团棉花糖一样在空中漂浮，适合用轻飘飘、软绵绵变形、小雨滴或闪电这类身体经验来回应。".to_string(),
         _ => "你当前的外观是一只可爱的桌宠。".to_string(),
     };
@@ -839,6 +786,211 @@ fn get_persona_prompt(
 }
 
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenerationKind {
+    Chat,
+    Behavior(BehaviorEvent),
+}
+
+struct ActiveGeneration {
+    kind: GenerationKind,
+    context: Option<BehaviorContext>,
+    retry_count: u8,
+    started_at: std::time::Instant,
+}
+
+struct PendingBehavior {
+    event: BehaviorEvent,
+    context: BehaviorContext,
+}
+
+struct TextReveal {
+    full_text: Vec<char>,
+    visible_chars: usize,
+    next_step: std::time::Instant,
+    step: std::time::Duration,
+    display_duration: std::time::Duration,
+}
+
+struct TrayControls {
+    mutter_enabled: CheckMenuItem,
+    mutter_intervals: [CheckMenuItem; 3],
+    touch_cooldowns: [CheckMenuItem; 3],
+    dream_intervals: [CheckMenuItem; 3],
+    personas: [CheckMenuItem; 4],
+    styles: [CheckMenuItem; 5],
+    weather_modes: [CheckMenuItem; 4],
+    font_sizes: [CheckMenuItem; 4],
+    pet_sizes: [CheckMenuItem; 5],
+    offload_timeouts: [CheckMenuItem; 3],
+}
+
+impl TrayControls {
+    fn sync(&self, config: &AppConfig) {
+        self.mutter_enabled.set_checked(config.mutter_enabled);
+        for (item, value) in self.mutter_intervals.iter().zip([60, 180, 300]) {
+            item.set_checked(config.mutter_interval_secs == value);
+        }
+        for (item, value) in self.touch_cooldowns.iter().zip([5, 15, 30]) {
+            item.set_checked(config.touch_response_cooldown_secs == value);
+        }
+        for (item, value) in self.dream_intervals.iter().zip([45, 75, 120]) {
+            item.set_checked(config.dream_interval_secs == value);
+        }
+        for (item, value) in self
+            .personas
+            .iter()
+            .zip(["default", "tsundere", "toxic", "moe"])
+        {
+            item.set_checked(config.persona == value);
+        }
+        for (item, value) in self
+            .styles
+            .iter()
+            .zip(["nimbus", "mochi", "starlit", "crab", "luma"])
+        {
+            item.set_checked(config.pet_style == value);
+        }
+        for (item, value) in self
+            .weather_modes
+            .iter()
+            .zip(["sunny", "windy", "rainy", "snowy"])
+        {
+            item.set_checked(config.weather_mode == value);
+        }
+        for (item, value) in self.font_sizes.iter().zip([20.0, 24.0, 28.0, 32.0]) {
+            item.set_checked((config.font_size - value).abs() < f32::EPSILON);
+        }
+        for (item, value) in self.pet_sizes.iter().zip([150, 200, 250, 300, 350]) {
+            item.set_checked(config.pet_size == value);
+        }
+        for (item, value) in self.offload_timeouts.iter().zip([30, 60, 120]) {
+            item.set_checked(config.idle_offload_secs == value);
+        }
+    }
+}
+
+impl TextReveal {
+    fn new(text: String, now: std::time::Instant, display_duration: std::time::Duration) -> Self {
+        Self {
+            full_text: text.chars().collect(),
+            visible_chars: 0,
+            next_step: now,
+            step: std::time::Duration::from_millis(48),
+            display_duration,
+        }
+    }
+
+    fn advance(&mut self, now: std::time::Instant) -> Option<String> {
+        if now < self.next_step || self.visible_chars >= self.full_text.len() {
+            return None;
+        }
+        self.visible_chars += 1;
+        self.next_step = now + self.step;
+        Some(self.full_text[..self.visible_chars].iter().collect())
+    }
+
+    fn is_complete(&self) -> bool {
+        self.visible_chars >= self.full_text.len()
+    }
+}
+
+fn behavior_context(
+    config: &AppConfig,
+    memory: &Arc<std::sync::Mutex<PetMemory>>,
+    app: String,
+    hour: u32,
+) -> BehaviorContext {
+    let (memory_summary, recent_lines) = memory
+        .lock()
+        .map(|mem| (mem.describe_for_prompt(), mem.recent_lines(8)))
+        .unwrap_or_else(|_| ("还在了解屏幕前的人的节奏。".to_string(), Vec::new()));
+    BehaviorContext {
+        pet_style: config.pet_style.clone(),
+        persona: config.persona.clone(),
+        weather: config.weather_mode.clone(),
+        app,
+        hour,
+        memory_summary,
+        recent_lines,
+    }
+}
+
+fn spawn_behavior_generation(
+    engine: Arc<LlamaEngine>,
+    tx: mpsc::Sender<String>,
+    event: BehaviorEvent,
+    context: BehaviorContext,
+    clean_retry: bool,
+) {
+    let prompt = build_behavior_prompt(event, &context, clean_retry);
+    tokio::spawn(async move {
+        if let Ok(mut stream) = engine.generate_mutter_stream(&prompt).await {
+            while let Some(chunk) = stream.next().await {
+                if tx.send(chunk).await.is_err() {
+                    return;
+                }
+            }
+            let _ = tx.send("[DONE]".to_string()).await;
+        } else {
+            let _ = tx.send("[OFFLINE]".to_string()).await;
+        }
+    });
+}
+
+fn fallback_for_behavior(
+    event: BehaviorEvent,
+    pet_style: &str,
+    weather_mode: &str,
+    app: &str,
+    hour: u32,
+) -> String {
+    match event {
+        BehaviorEvent::Startup => startup_fallback_line(pet_style).to_string(),
+        BehaviorEvent::Touch => {
+            let lines = touch_response_lines(pet_style);
+            lines[get_pseudo_random_index(lines.len())].to_string()
+        }
+        BehaviorEvent::Ambient => get_offline_mutter(app, hour, pet_style),
+        BehaviorEvent::Dream => style_speech_profile(pet_style).sleep_line.to_string(),
+        BehaviorEvent::BodyChanged => style_switch_line(pet_style).to_string(),
+        BehaviorEvent::WeatherChanged => weather_feedback_line(pet_style, weather_mode).to_string(),
+        BehaviorEvent::Renamed => "这个新称呼，我记下了。".to_string(),
+        BehaviorEvent::PersonaShift => "我试着用新的语气陪你。".to_string(),
+        BehaviorEvent::MemoryReset => "我会从现在开始重新认识你。".to_string(),
+    }
+}
+
+fn queue_behavior(pending: &mut Option<PendingBehavior>, request: PendingBehavior) {
+    let should_replace = pending
+        .as_ref()
+        .map(|current| request.event.priority() >= current.event.priority())
+        .unwrap_or(true);
+    if should_replace {
+        *pending = Some(request);
+    }
+}
+
+fn queue_contextual_behavior(
+    pending: &mut Option<PendingBehavior>,
+    event: BehaviorEvent,
+    config: &AppConfig,
+    memory: &Arc<std::sync::Mutex<PetMemory>>,
+    observer_state: &Arc<std::sync::Mutex<(String, u32)>>,
+) {
+    let (app, hour) = observer_state
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_else(|_| ("未知应用".to_string(), 12));
+    queue_behavior(
+        pending,
+        PendingBehavior {
+            event,
+            context: behavior_context(config, memory, app, hour),
+        },
+    );
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
@@ -853,7 +1005,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_loop = EventLoop::new()?;
 
     // Build System Tray
-    let _tray_icon = {
+    let (_tray_icon, tray_controls) = {
         let menu = Menu::new();
         let model_label = match config.model_path.as_ref() {
             Some(path) if path.is_file() => "对话模式：本地模型",
@@ -875,61 +1027,296 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         menu.append(&mutter_check).unwrap();
 
+        let frequency_submenu = Submenu::with_id("behavior_frequency", "互动频率", true);
+        let mutter_submenu = Submenu::with_id("mutter_frequency", "自言自语间隔", true);
+        let mutter_60 = CheckMenuItem::with_id(
+            "mutter_interval_60",
+            "约 1 分钟",
+            true,
+            config.mutter_interval_secs == 60,
+            None,
+        );
+        let mutter_180 = CheckMenuItem::with_id(
+            "mutter_interval_180",
+            "约 3 分钟",
+            true,
+            config.mutter_interval_secs == 180,
+            None,
+        );
+        let mutter_300 = CheckMenuItem::with_id(
+            "mutter_interval_300",
+            "约 5 分钟",
+            true,
+            config.mutter_interval_secs == 300,
+            None,
+        );
+        mutter_submenu
+            .append_items(&[&mutter_60, &mutter_180, &mutter_300])
+            .unwrap();
+
+        let touch_submenu = Submenu::with_id("touch_frequency", "触摸回应冷却", true);
+        let touch_5 = CheckMenuItem::with_id(
+            "touch_cooldown_5",
+            "5 秒",
+            true,
+            config.touch_response_cooldown_secs == 5,
+            None,
+        );
+        let touch_15 = CheckMenuItem::with_id(
+            "touch_cooldown_15",
+            "15 秒",
+            true,
+            config.touch_response_cooldown_secs == 15,
+            None,
+        );
+        let touch_30 = CheckMenuItem::with_id(
+            "touch_cooldown_30",
+            "30 秒",
+            true,
+            config.touch_response_cooldown_secs == 30,
+            None,
+        );
+        touch_submenu
+            .append_items(&[&touch_5, &touch_15, &touch_30])
+            .unwrap();
+
+        let dream_submenu = Submenu::with_id("dream_frequency", "梦话间隔", true);
+        let dream_45 = CheckMenuItem::with_id(
+            "dream_interval_45",
+            "约 45 秒",
+            true,
+            config.dream_interval_secs == 45,
+            None,
+        );
+        let dream_75 = CheckMenuItem::with_id(
+            "dream_interval_75",
+            "约 75 秒",
+            true,
+            config.dream_interval_secs == 75,
+            None,
+        );
+        let dream_120 = CheckMenuItem::with_id(
+            "dream_interval_120",
+            "约 2 分钟",
+            true,
+            config.dream_interval_secs == 120,
+            None,
+        );
+        dream_submenu
+            .append_items(&[&dream_45, &dream_75, &dream_120])
+            .unwrap();
+        frequency_submenu
+            .append_items(&[&mutter_submenu, &touch_submenu, &dream_submenu])
+            .unwrap();
+        menu.append(&frequency_submenu).unwrap();
+
         let persona_submenu = Submenu::with_id("persona", "切换桌宠人设", true);
-        let p_default = MenuItem::with_id("persona_default", "软萌活泼 (默认)", true, None);
-        let p_tsundere = MenuItem::with_id("persona_tsundere", "傲娇嘴硬", true, None);
-        let p_toxic = MenuItem::with_id("persona_toxic", "冷酷毒舌", true, None);
-        let p_moe = MenuItem::with_id("persona_moe", "极度粘人", true, None);
+        let p_default = CheckMenuItem::with_id(
+            "persona_default",
+            "软萌活泼 (默认)",
+            true,
+            config.persona == "default",
+            None,
+        );
+        let p_tsundere = CheckMenuItem::with_id(
+            "persona_tsundere",
+            "傲娇嘴硬",
+            true,
+            config.persona == "tsundere",
+            None,
+        );
+        let p_toxic = CheckMenuItem::with_id(
+            "persona_toxic",
+            "冷酷毒舌",
+            true,
+            config.persona == "toxic",
+            None,
+        );
+        let p_moe = CheckMenuItem::with_id(
+            "persona_moe",
+            "极度粘人",
+            true,
+            config.persona == "moe",
+            None,
+        );
         persona_submenu
             .append_items(&[&p_default, &p_tsundere, &p_toxic, &p_moe])
             .unwrap();
         menu.append(&persona_submenu).unwrap();
 
         let style_submenu = Submenu::with_id("pet_style", "切换桌宠外观", true);
-        let s_nimbus = MenuItem::with_id("style_nimbus", "粉蓝小云朵 (Nimbus)", true, None);
-        let s_mochi = MenuItem::with_id("style_mochi", "抹茶猫咪麻薯 (Mochi)", true, None);
-        let s_starlit = MenuItem::with_id("style_starlit", "太空章鱼 (Starlit)", true, None);
-        let s_crab = MenuItem::with_id("style_crab", "红螯小螃蟹 (Crab)", true, None);
+        let s_nimbus = CheckMenuItem::with_id(
+            "style_nimbus",
+            "粉蓝小云朵 (Nimbus)",
+            true,
+            config.pet_style == "nimbus",
+            None,
+        );
+        let s_mochi = CheckMenuItem::with_id(
+            "style_mochi",
+            "抹茶猫咪麻薯 (Mochi)",
+            true,
+            config.pet_style == "mochi",
+            None,
+        );
+        let s_starlit = CheckMenuItem::with_id(
+            "style_starlit",
+            "太空章鱼 (Starlit)",
+            true,
+            config.pet_style == "starlit",
+            None,
+        );
+        let s_crab = CheckMenuItem::with_id(
+            "style_crab",
+            "红螯小螃蟹 (Crab)",
+            true,
+            config.pet_style == "crab",
+            None,
+        );
+        let s_luma = CheckMenuItem::with_id(
+            "style_luma",
+            "月灯兔 (Luma)",
+            true,
+            config.pet_style == "luma",
+            None,
+        );
         style_submenu
-            .append_items(&[&s_nimbus, &s_mochi, &s_starlit, &s_crab])
+            .append_items(&[&s_nimbus, &s_mochi, &s_starlit, &s_crab, &s_luma])
             .unwrap();
         menu.append(&style_submenu).unwrap();
 
         let weather_submenu = Submenu::with_id("weather_sub", "切换桌宠天气", true);
-        let w_sunny = MenuItem::with_id("weather_sunny", "☀️ 晴天", true, None);
-        let w_windy = MenuItem::with_id("weather_windy", "💨 狂风", true, None);
-        let w_rainy = MenuItem::with_id("weather_rainy", "🌧️ 细雨", true, None);
-        let w_snowy = MenuItem::with_id("weather_snowy", "❄️ 飘雪", true, None);
+        let w_sunny = CheckMenuItem::with_id(
+            "weather_sunny",
+            "☀️ 晴天",
+            true,
+            config.weather_mode == "sunny",
+            None,
+        );
+        let w_windy = CheckMenuItem::with_id(
+            "weather_windy",
+            "💨 狂风",
+            true,
+            config.weather_mode == "windy",
+            None,
+        );
+        let w_rainy = CheckMenuItem::with_id(
+            "weather_rainy",
+            "🌧️ 细雨",
+            true,
+            config.weather_mode == "rainy",
+            None,
+        );
+        let w_snowy = CheckMenuItem::with_id(
+            "weather_snowy",
+            "❄️ 飘雪",
+            true,
+            config.weather_mode == "snowy",
+            None,
+        );
         weather_submenu
             .append_items(&[&w_sunny, &w_windy, &w_rainy, &w_snowy])
             .unwrap();
         menu.append(&weather_submenu).unwrap();
 
         let font_submenu = Submenu::with_id("font_size", "调整字号大小", true);
-        let f_20 = MenuItem::with_id("font_20", "20 像素", true, None);
-        let f_24 = MenuItem::with_id("font_24", "24 像素 (默认)", true, None);
-        let f_28 = MenuItem::with_id("font_28", "28 像素", true, None);
-        let f_32 = MenuItem::with_id("font_32", "32 像素", true, None);
+        let f_20 = CheckMenuItem::with_id(
+            "font_20",
+            "20 像素",
+            true,
+            (config.font_size - 20.0).abs() < f32::EPSILON,
+            None,
+        );
+        let f_24 = CheckMenuItem::with_id(
+            "font_24",
+            "24 像素 (默认)",
+            true,
+            (config.font_size - 24.0).abs() < f32::EPSILON,
+            None,
+        );
+        let f_28 = CheckMenuItem::with_id(
+            "font_28",
+            "28 像素",
+            true,
+            (config.font_size - 28.0).abs() < f32::EPSILON,
+            None,
+        );
+        let f_32 = CheckMenuItem::with_id(
+            "font_32",
+            "32 像素",
+            true,
+            (config.font_size - 32.0).abs() < f32::EPSILON,
+            None,
+        );
         font_submenu
             .append_items(&[&f_20, &f_24, &f_28, &f_32])
             .unwrap();
         menu.append(&font_submenu).unwrap();
 
         let size_submenu = Submenu::with_id("pet_size_sub", "调整桌宠大小", true);
-        let s_150 = MenuItem::with_id("size_150", "小 (150 像素)", true, None);
-        let s_200 = MenuItem::with_id("size_200", "中 (200 像素)", true, None);
-        let s_250 = MenuItem::with_id("size_250", "大 (250 像素)", true, None);
-        let s_300 = MenuItem::with_id("size_300", "特大 (300 像素)", true, None);
+        let s_150 = CheckMenuItem::with_id(
+            "size_150",
+            "小 (150 像素)",
+            true,
+            config.pet_size == 150,
+            None,
+        );
+        let s_200 = CheckMenuItem::with_id(
+            "size_200",
+            "中 (200 像素)",
+            true,
+            config.pet_size == 200,
+            None,
+        );
+        let s_250 = CheckMenuItem::with_id(
+            "size_250",
+            "大 (250 像素)",
+            true,
+            config.pet_size == 250,
+            None,
+        );
+        let s_300 = CheckMenuItem::with_id(
+            "size_300",
+            "特大 (300 像素)",
+            true,
+            config.pet_size == 300,
+            None,
+        );
+        let s_350 = CheckMenuItem::with_id(
+            "size_350",
+            "巨型 (350 像素)",
+            true,
+            config.pet_size == 350,
+            None,
+        );
         size_submenu
-            .append_items(&[&s_150, &s_200, &s_250, &s_300])
+            .append_items(&[&s_150, &s_200, &s_250, &s_300, &s_350])
             .unwrap();
         menu.append(&size_submenu).unwrap();
 
         let config_submenu = Submenu::with_id("config_sub", "系统参数设置", true);
         let c_clear = MenuItem::with_id("action_clear", "清空对话历史", true, None);
-        let c_sleep_30 = MenuItem::with_id("sleep_30", "显存休眠 30 秒", true, None);
-        let c_sleep_60 = MenuItem::with_id("sleep_60", "显存休眠 60 秒", true, None);
-        let c_sleep_120 = MenuItem::with_id("sleep_120", "显存休眠 120 秒", true, None);
+        let c_sleep_30 = CheckMenuItem::with_id(
+            "sleep_30",
+            "显存休眠 30 秒",
+            true,
+            config.idle_offload_secs == 30,
+            None,
+        );
+        let c_sleep_60 = CheckMenuItem::with_id(
+            "sleep_60",
+            "显存休眠 60 秒",
+            true,
+            config.idle_offload_secs == 60,
+            None,
+        );
+        let c_sleep_120 = CheckMenuItem::with_id(
+            "sleep_120",
+            "显存休眠 120 秒",
+            true,
+            config.idle_offload_secs == 120,
+            None,
+        );
         config_submenu
             .append_items(&[&c_clear, &c_sleep_30, &c_sleep_60, &c_sleep_120])
             .unwrap();
@@ -951,22 +1338,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let exit_item = MenuItem::with_id("action_exit", "退出桌宠", true, None);
         menu.append(&exit_item).unwrap();
 
-        TrayIconBuilder::new()
+        let tray_icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip("灵霓 Nimbus 桌宠控制面板")
             .with_icon(create_tray_icon())
             .with_icon_as_template(true)
             .build()
-            .unwrap()
+            .unwrap();
+        let controls = TrayControls {
+            mutter_enabled: mutter_check,
+            mutter_intervals: [mutter_60, mutter_180, mutter_300],
+            touch_cooldowns: [touch_5, touch_15, touch_30],
+            dream_intervals: [dream_45, dream_75, dream_120],
+            personas: [p_default, p_tsundere, p_toxic, p_moe],
+            styles: [s_nimbus, s_mochi, s_starlit, s_crab, s_luma],
+            weather_modes: [w_sunny, w_windy, w_rainy, w_snowy],
+            font_sizes: [f_20, f_24, f_28, f_32],
+            pet_sizes: [s_150, s_200, s_250, s_300, s_350],
+            offload_timeouts: [c_sleep_30, c_sleep_60, c_sleep_120],
+        };
+        controls.sync(&config);
+        (tray_icon, controls)
     };
 
     // Pet Window Logical Dimension (tight wrapping)
-    let pet_win_width = config.pet_size;
-    let pet_win_height = (config.pet_size as f32 * 0.55) as u32;
+    let (pet_win_width, pet_win_height) =
+        pet_window_logical_size(config.pet_size, &config.pet_style);
 
     // Bubble Window Initial Logical Dimension (will dynamically adapt)
-    let bubble_win_width = 300;
-    let bubble_win_height = 200;
+    let bubble_win_width = BUBBLE_INITIAL_WIDTH;
+    let bubble_win_height = BUBBLE_INITIAL_HEIGHT;
 
     // 3. Setup Window (Pet Window)
     let window = WindowBuilder::new()
@@ -1103,12 +1504,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_interactive_time = std::time::Instant::now();
     let mut last_hover_trigger_time: Option<std::time::Instant> = None;
     let mut was_pointer_on_pet = false;
-    let mut was_online = false;
     let mut is_pointer_on_pet = false;
+    let mut is_dragging_pet = false;
+    let mut pet_hittest_enabled = true;
     let mut surprised_timer: Option<std::time::Instant> = None;
-    let mut is_muttering = false;
-    let mut last_mouse_phys_x = 0.0f64;
-    let mut last_mouse_phys_y = 0.0f64;
+    let mut last_pointer_sample: Option<(std::time::Instant, f64, f64)> = None;
+    let state_now = std::time::Instant::now();
+    let mut last_global_pointer_position: Option<(i32, i32)> = None;
+    let mut last_global_pointer_motion = state_now;
+    let mut last_state_change = state_now;
+    let mut state_machine = StateMachine::new(PetState::Idle, state_now);
+    let mut was_sleeping = false;
 
     // Channels for text streaming and terminal input
     let (tx, mut rx) = mpsc::channel::<String>(100);
@@ -1117,7 +1523,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dialogs = desktop::DesktopDialogs::new();
     let mut last_message = startup_fallback_line(&config.pet_style).to_string();
     let mut active_response = String::new();
-    let mut is_startup_generation = false;
+    let mut active_generation: Option<ActiveGeneration> = None;
+    let mut pending_behavior: Option<PendingBehavior> = None;
+    let mut bubble_reveal: Option<TextReveal> = None;
+    let entropy = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut next_mutter_at = state_now + jittered_interval(config.mutter_interval_secs, entropy);
+    let mut next_dream_at =
+        state_now + jittered_interval(config.dream_interval_secs, entropy.rotate_left(17));
 
     // 6. Spawn Stdin non-blocking reader task
     let idle_sec_hint = config.idle_offload_secs;
@@ -1171,25 +1586,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref engine) = llama_engine {
         filter = think_filter::ThinkBlockFilter::new(config.expose_think, false);
         active_response.clear();
-        is_muttering = true;
-        is_startup_generation = true;
-
-        let memory_desc = memory
-            .lock()
-            .map(|mem| mem.describe_for_prompt())
-            .unwrap_or_else(|_| "你还没有关于屏幕前的人的日常偏好记忆。".to_string());
-        let prompt = build_startup_prompt(&memory_desc, &config.pet_style, &config.weather_mode);
-        let engine_clone = engine.clone();
-        let tx_clone = tx.clone();
-        tokio::spawn(async move {
-            if let Ok(mut stream) = engine_clone.generate_mutter_stream(&prompt).await {
-                while let Some(chunk) = stream.next().await {
-                    let _ = tx_clone.send(chunk).await;
-                }
-                let _ = tx_clone.send("[DONE]".to_string()).await;
-            } else {
-                let _ = tx_clone.send("[OFFLINE]".to_string()).await;
-            }
+        let context = behavior_context(&config, &memory, "桌面".to_string(), 12);
+        spawn_behavior_generation(
+            engine.clone(),
+            tx.clone(),
+            BehaviorEvent::Startup,
+            context.clone(),
+            false,
+        );
+        active_generation = Some(ActiveGeneration {
+            kind: GenerationKind::Behavior(BehaviorEvent::Startup),
+            context: Some(context),
+            retry_count: 0,
+            started_at: std::time::Instant::now(),
         });
     } else {
         bubble_renderer.set_text(startup_fallback_line(&config.pet_style));
@@ -1206,27 +1615,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run(move |event, elwt| {
         elwt.set_control_flow(ControlFlow::Wait);
 
-        // Detect LLM Offload/Restore status changes
-        let is_online = if let Some(ref engine) = llama_engine {
-            engine.is_model_online()
-        } else {
-            false
-        };
-
-        if was_online && !is_online {
-            // Smart Offload is an internal resource event; it should not steal the pet's speech.
-            pet_renderer.pet_state = "sleeping".to_string();
-            last_interactive_time = std::time::Instant::now();
-            window_for_run.request_redraw();
-        } else if !was_online && is_online {
-            // Model re-activated
-            if pet_renderer.pet_state == "sleeping" {
-                pet_renderer.pet_state = "idle".to_string();
-                window_for_run.request_redraw();
-            }
-        }
-        was_online = is_online;
-
         while let Some(result) = dialogs.try_recv() {
             match result {
                 desktop::DialogResult::Input(desktop::InputKind::Chat, text) => {
@@ -1241,6 +1629,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     config.pet_name = name;
                     config.save();
+                    queue_contextual_behavior(&mut pending_behavior, BehaviorEvent::Renamed, &config, &memory, &observer_state);
                     window_for_run.request_redraw();
                 }
                 desktop::DialogResult::Failed => {
@@ -1250,12 +1639,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        if !active_response.trim().is_empty() && !is_muttering && !is_startup_generation {
+        if !active_response.trim().is_empty() && active_generation.as_ref().is_none_or(|session| session.kind == GenerationKind::Chat) {
             last_message.clone_from(&active_response);
         }
 
         // Process incoming Stdin commands
-        while let Ok(input_prompt) = stdin_rx.try_recv() {
+        while active_generation.is_none() {
+            let Ok(input_prompt) = stdin_rx.try_recv() else {
+                break;
+            };
             if input_prompt == "/exit" {
                 println!("Exiting Nimbus Desk Pet. Goodbye!");
                 elwt.exit();
@@ -1276,14 +1668,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if let Some(ref engine) = llama_engine {
-                is_startup_generation = false;
                 filter = think_filter::ThinkBlockFilter::new(config.expose_think, false);
                 in_thinking_block = false;
                 active_response.clear();
-                pet_renderer.pet_state = "thinking".to_string();
-                bubble_renderer.set_text("思考中...");
-                bubble_timer = None; // Disable hide timer during generation
+                bubble_renderer.set_text("");
+                bubble_timer = None;
+                bubble_reveal = None;
                 last_interactive_time = std::time::Instant::now();
+                let entropy = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos();
+                next_mutter_at = last_interactive_time
+                    + jittered_interval(config.mutter_interval_secs, entropy);
                 window_for_run.request_redraw();
 
                 if let Ok(mut mem) = memory.lock() {
@@ -1314,11 +1711,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _ = tx_clone.send("[OFFLINE]".to_string()).await;
                     }
                 });
+                active_generation = Some(ActiveGeneration {
+                    kind: GenerationKind::Chat,
+                    context: None,
+                    retry_count: 0,
+                    started_at: std::time::Instant::now(),
+                });
             } else {
                 active_response = desktop::NO_MODEL_MESSAGE.to_string();
                 bubble_renderer.set_text(&active_response);
                 bubble_timer = Some(std::time::Instant::now());
-                bubble_show_duration = std::time::Duration::from_secs(6);
+                bubble_show_duration = std::time::Duration::from_secs(12);
+                bubble_reveal = None;
                 window_for_run.request_redraw();
             }
         }
@@ -1342,86 +1746,177 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         active_response.push_str(&out.content);
                     }
                 }
-                let was_muttering = is_muttering;
-                is_muttering = false;
                 println!();
-                println!("[LLM Output Done] is_startup: {}, was_muttering: {}, response: {:?}", is_startup_generation, was_muttering, active_response);
-
-                if is_startup_generation {
-                    active_response = clean_startup_line(&active_response, &config.pet_style);
-                    println!("[LLM Startup Cleaned] response: {:?}", active_response);
-                    bubble_renderer.set_text(&active_response);
-                    is_startup_generation = false;
-                } else if was_muttering {
-                    let (app, hour) = {
-                        if let Ok(guard) = observer_state.lock() {
-                            guard.clone()
-                        } else {
-                            ("未知应用".to_string(), 12)
-                        }
-                    };
-                    let fallback = get_offline_mutter(&app, hour, &config.pet_style);
-                    active_response = clean_mutter_line(&active_response, &config.pet_style, &fallback);
-                    println!("[LLM Mutter Cleaned] response: {:?}", active_response);
-                    bubble_renderer.set_text(&active_response);
-                } else {
-                    if active_response.trim().is_empty() {
-                        active_response = desktop::EMPTY_RESPONSE_MESSAGE.to_string();
-                    }
-                    bubble_renderer.set_text(&active_response);
-                }
-                if was_muttering && !config.mutter_enabled {
+                let Some(session) = active_generation.take() else {
                     active_response.clear();
-                    bubble_renderer.set_text("");
-                }
+                    continue;
+                };
+                let elapsed_ms = session.started_at.elapsed().as_millis();
 
-                bubble_timer = Some(std::time::Instant::now());
-                bubble_show_duration = std::time::Duration::from_secs(config.bubble_timeout_secs);
-                last_interactive_time = std::time::Instant::now();
-                if !active_response.trim().is_empty() {
-                    if let Ok(mut mem) = memory.lock() {
-                        mem.record_spoken_line(&active_response);
+                match session.kind {
+                    GenerationKind::Behavior(BehaviorEvent::Ambient | BehaviorEvent::Dream) if !config.mutter_enabled => {
+                        active_response.clear();
+                        bubble_renderer.set_text("");
+                        bubble_timer = None;
+                        bubble_reveal = None;
+                    }
+                    GenerationKind::Chat => {
+                        active_response = active_response.trim().to_string();
+                        if active_response.is_empty() {
+                            active_response = desktop::EMPTY_RESPONSE_MESSAGE.to_string();
+                        }
+                        bubble_renderer.set_text(&active_response);
+                        bubble_timer = Some(std::time::Instant::now());
+                        bubble_show_duration =
+                            std::time::Duration::from_secs(config.bubble_timeout_secs);
+                        if !active_response.is_empty() {
+                            if let Ok(mut mem) = memory.lock() {
+                                mem.record_spoken_line(&active_response);
+                            }
+                        }
+                        println!(
+                            "[Generation] kind=chat status=accepted duration_ms={} chars={}",
+                            elapsed_ms,
+                            active_response.chars().count()
+                        );
+                    }
+                    GenerationKind::Behavior(event) => {
+                        let context = session.context.unwrap_or_else(|| {
+                            behavior_context(
+                                &config,
+                                &memory,
+                                "未知应用".to_string(),
+                                12,
+                            )
+                        });
+                        let cleaned = clean_behavior_line(
+                            &active_response,
+                            event,
+                            &context.pet_style,
+                            context.hour,
+                            &context.recent_lines,
+                        );
+
+                        if cleaned.is_none() {
+                            log::debug!(
+                                "[Generation] kind={event:?} rejected={:?}",
+                                active_response
+                            );
+                        }
+
+                        if cleaned.is_none() && session.retry_count < event.max_retries() {
+                            if let Some(ref engine) = llama_engine {
+                                println!(
+                                    "[Generation] kind={event:?} status=retry duration_ms={elapsed_ms}"
+                                );
+                                active_response.clear();
+                                filter = think_filter::ThinkBlockFilter::new(
+                                    config.expose_think,
+                                    false,
+                                );
+                                in_thinking_block = false;
+                                spawn_behavior_generation(
+                                    engine.clone(),
+                                    tx.clone(),
+                                    event,
+                                    context.clone(),
+                                    true,
+                                );
+                                active_generation = Some(ActiveGeneration {
+                                    kind: GenerationKind::Behavior(event),
+                                    context: Some(context),
+                                    retry_count: session.retry_count + 1,
+                                    started_at: std::time::Instant::now(),
+                                });
+                                continue;
+                            }
+                        }
+
+                        let used_fallback = cleaned.is_none();
+                        active_response = cleaned.unwrap_or_else(|| {
+                            fallback_for_behavior(
+                                event,
+                                &context.pet_style,
+                                &context.weather,
+                                &context.app,
+                                context.hour,
+                            )
+                        });
+                        bubble_renderer.set_text("");
+                        bubble_timer = None;
+                        bubble_show_duration = event.display_duration();
+                        bubble_reveal = Some(TextReveal::new(
+                            active_response.clone(),
+                            std::time::Instant::now(),
+                            bubble_show_duration,
+                        ));
+                        if let Ok(mut mem) = memory.lock() {
+                            mem.record_spoken_line(&active_response);
+                        }
+                        println!(
+                            "[Generation] kind={event:?} status={} duration_ms={} chars={}",
+                            if used_fallback { "fallback" } else { "accepted" },
+                            elapsed_ms,
+                            active_response.chars().count()
+                        );
                     }
                 }
                 window_for_run.request_redraw();
             } else if new_text == "[OFFLINE]" {
-                if is_startup_generation {
-                    active_response = startup_fallback_line(&config.pet_style).to_string();
-                    bubble_renderer.set_text(&active_response);
-                    is_startup_generation = false;
-                    is_muttering = false;
-                    bubble_timer = Some(std::time::Instant::now());
-                    bubble_show_duration =
-                        std::time::Duration::from_secs(config.bubble_timeout_secs);
-                    window_for_run.request_redraw();
-                    continue;
+                let session = active_generation.take();
+                if let Some(ref session) = session {
+                    println!(
+                        "[Generation] kind={:?} status=offline duration_ms={}",
+                        session.kind,
+                        session.started_at.elapsed().as_millis()
+                    );
                 }
-                // Mutter fallback triggered if model is currently offline (handled below in muttering dispatch)
-                let (app, hour) = {
-                    if let Ok(guard) = observer_state.lock() {
-                        guard.clone()
-                    } else {
-                        ("未知应用".to_string(), 12)
+                match session.map(|session| session.kind) {
+                    Some(GenerationKind::Behavior(BehaviorEvent::Ambient | BehaviorEvent::Dream)) if !config.mutter_enabled => {
+                        active_response.clear();
+                        bubble_renderer.set_text("");
+                        bubble_timer = None;
+                        bubble_reveal = None;
                     }
-                };
-                active_response = if is_muttering {
-                    if config.mutter_enabled { get_offline_mutter(&app, hour, &config.pet_style) } else { String::new() }
-                } else {
-                    desktop::EMPTY_RESPONSE_MESSAGE.to_string()
-                };
-                bubble_renderer.set_text(&active_response);
-                is_muttering = false;
-                bubble_timer = Some(std::time::Instant::now());
-                bubble_show_duration = std::time::Duration::from_secs(8);
-                last_interactive_time = std::time::Instant::now();
+                    Some(GenerationKind::Behavior(event)) => {
+                        let (app, hour) = observer_state
+                            .lock()
+                            .map(|guard| guard.clone())
+                            .unwrap_or_else(|_| ("未知应用".to_string(), 12));
+                        active_response = fallback_for_behavior(
+                            event,
+                            &config.pet_style,
+                            &config.weather_mode,
+                            &app,
+                            hour,
+                        );
+                        bubble_renderer.set_text("");
+                        bubble_timer = None;
+                        bubble_show_duration = event.display_duration();
+                        bubble_reveal = Some(TextReveal::new(
+                            active_response.clone(),
+                            std::time::Instant::now(),
+                            bubble_show_duration,
+                        ));
+                    }
+                    _ => {
+                        active_response = desktop::EMPTY_RESPONSE_MESSAGE.to_string();
+                        bubble_renderer.set_text(&active_response);
+                        bubble_timer = Some(std::time::Instant::now());
+                        bubble_show_duration = std::time::Duration::from_secs(12);
+                        bubble_reveal = None;
+                    }
+                }
                 window_for_run.request_redraw();
             } else {
-                if !is_startup_generation {
+                let is_chat = active_generation
+                    .as_ref()
+                    .is_some_and(|session| session.kind == GenerationKind::Chat);
+                if is_chat {
                     print!("{}", new_text);
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
                 }
-                is_muttering = true;
 
                 let outputs = filter.feed(&new_text);
                 for out in outputs {
@@ -1439,11 +1934,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         active_response.push_str(&out.content);
                     }
                 }
-                if !is_startup_generation {
+                if is_chat {
                     bubble_renderer.set_text(&active_response);
                     window_for_run.request_redraw();
                 }
             }
+        }
+
+        let reveal_now = std::time::Instant::now();
+        let mut completed_reveal_duration = None;
+        if let Some(reveal) = bubble_reveal.as_mut() {
+            if let Some(visible_text) = reveal.advance(reveal_now) {
+                bubble_renderer.set_text(&visible_text);
+                window_for_run.request_redraw();
+                bubble_window_clone.request_redraw();
+            }
+            if reveal.is_complete() {
+                completed_reveal_duration = Some(reveal.display_duration);
+            }
+        }
+        if let Some(duration) = completed_reveal_duration {
+            bubble_reveal = None;
+            bubble_timer = Some(reveal_now);
+            bubble_show_duration = duration;
         }
 
         // Handle auto-fade timeout for chat bubble
@@ -1469,7 +1982,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bubble_renderer.set_font_size(config.font_size);
         }
 
-        if bubble_timer.is_some() && bubble_renderer.has_text() {
+        let chat_is_streaming = active_generation
+            .as_ref()
+            .is_some_and(|session| session.kind == GenerationKind::Chat);
+        if (bubble_timer.is_some() || bubble_reveal.is_some() || chat_is_streaming)
+            && bubble_renderer.has_text()
+        {
             if let (Some(monitor), Ok(pos)) = (window_for_run.current_monitor(), window_for_run.outer_position()) {
                 let origin = monitor.position();
                 let size = monitor.size();
@@ -1560,79 +2078,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             window_for_run.request_redraw();
                         }
                         WindowEvent::RedrawRequested => {
-                            if !pet_renderer.pointer_inside {
-                                use mouse_position::mouse_position::Mouse;
-                                if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
-                                    if let Ok(win_pos) = window_for_run.outer_position() {
-                                        let px = x as f64;
-                                        let py = y as f64;
-                                        let wx = px - win_pos.x as f64;
-                                        let wy = py - win_pos.y as f64;
-                                        set_pet_pointer_from_physical(
-                                            &mut pet_renderer,
-                                            window_for_run.inner_size(),
-                                            wx,
-                                            wy,
-                                        );
-                                    }
+                            use mouse_position::mouse_position::Mouse;
+                            if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                                if let Ok(win_pos) = window_for_run.outer_position() {
+                                    let wx = x as f64 - win_pos.x as f64;
+                                    let wy = y as f64 - win_pos.y as f64;
+                                    set_pet_pointer_from_physical(
+                                        &mut pet_renderer,
+                                        window_for_run.inner_size(),
+                                        wx,
+                                        wy,
+                                    );
                                 }
                             }
 
-                            // 智能状态决策引擎 (Smart State Decision Engine)
-                            let current_state = {
-                                let now_inst = std::time::Instant::now();
-                                let is_surprised = if let Some(st) = surprised_timer {
-                                    now_inst.duration_since(st) < std::time::Duration::from_millis(1500)
-                                } else {
-                                    false
-                                };
-
-                                if is_surprised {
-                                    "surprised".to_string()
-                                } else if is_pointer_on_pet {
-                                    "tickled".to_string()
-                                } else if is_muttering {
-                                    if in_thinking_block {
-                                        "thinking".to_string()
-                                    } else {
-                                        "muttering".to_string()
-                                    }
-                                } else if pet_renderer.pointer_inside {
-                                    "attentive".to_string()
-                                } else if !is_online {
-                                    "sleeping".to_string()
-                                } else {
-                                    let (app, hour) = {
-                                        if let Ok(guard) = observer_state.lock() {
-                                            guard.clone()
-                                        } else {
-                                            ("未知应用".to_string(), 12)
-                                        }
-                                    };
-                                    let idle_duration = now_inst.duration_since(last_interactive_time);
-
-                                    if idle_duration > std::time::Duration::from_secs(90) {
-                                        "bored".to_string()
-                                    } else {
-                                        let app_lower = app.to_lowercase();
-                                        let is_dev_app = app_lower.contains("code")
-                                            || app_lower.contains("terminal")
-                                            || app_lower.contains("xcode")
-                                            || app_lower.contains("cargo")
-                                            || app_lower.contains("idea")
-                                            || app_lower.contains("warp");
-
-                                        if is_dev_app {
-                                            "working".to_string()
-                                        } else if hour >= 23 || hour <= 5 {
-                                            "tired".to_string()
-                                        } else {
-                                            "idle".to_string()
-                                        }
-                                    }
-                                }
-                            };
-                            pet_renderer.pet_state = current_state;
+                            let now_inst = std::time::Instant::now();
+                            let (app, hour) = observer_state
+                                .lock()
+                                .map(|guard| guard.clone())
+                                .unwrap_or_else(|_| ("未知应用".to_string(), 12));
+                            let dreaming = active_generation.as_ref().is_some_and(|session| {
+                                session.kind
+                                    == GenerationKind::Behavior(BehaviorEvent::Dream)
+                            });
+                            let target_state = decide_state(&StateContext {
+                                surprised: surprised_timer.is_some_and(|started| {
+                                    now_inst.duration_since(started)
+                                        < std::time::Duration::from_millis(900)
+                                }),
+                                pointer_on_pet: is_pointer_on_pet,
+                                dreaming,
+                                muttering: active_generation.is_some(),
+                                thinking: in_thinking_block
+                                    || (active_generation.is_some()
+                                        && active_response.trim().is_empty()),
+                                idle_duration: now_inst.duration_since(last_interactive_time),
+                                active_app: &app,
+                                hour,
+                            });
+                            let previous_state = state_machine.current();
+                            let current_state = state_machine.update(target_state, now_inst);
+                            if current_state != previous_state {
+                                last_state_change = now_inst;
+                            }
+                            pet_renderer.pet_state = current_state.as_str().to_string();
 
                             pet_renderer.update_and_draw();
 
@@ -1647,19 +2136,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             if state == ElementState::Pressed {
                                 if is_on_pet {
+                                    is_dragging_pet = true;
+                                    last_interactive_time = std::time::Instant::now();
                                     if let Err(e) = window_for_run.drag_window() {
                                         eprintln!("Failed to drag window: {:?}", e);
                                     }
                                 }
-                            } else if state == ElementState::Released {
+                            } else if is_dragging_pet {
+                                is_dragging_pet = false;
                                 surprised_timer = Some(std::time::Instant::now());
                                 pet_renderer.add_emotion(-0.02, 0.15);
                             }
                         }
                         WindowEvent::CursorMoved { position, .. } => {
-                            pet_renderer.pointer_inside = true;
                             cursor_position = position;
-                            last_interactive_time = std::time::Instant::now();
 
                             set_pet_pointer_from_physical(
                                 &mut pet_renderer,
@@ -1668,54 +2158,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 position.y,
                             );
 
-                            let phys_x = position.x;
-                            let phys_y = position.y;
-                            if last_mouse_phys_x > 0.0 && last_mouse_phys_y > 0.0 {
-                                let dx = phys_x - last_mouse_phys_x;
-                                let dy = phys_y - last_mouse_phys_y;
-                                let speed = (dx * dx + dy * dy).sqrt();
-                                if speed > 220.0 {
-                                    surprised_timer = Some(std::time::Instant::now());
-                                    pet_renderer.add_emotion(-0.08, 0.35);
-                                }
-                            }
-                            last_mouse_phys_x = phys_x;
-                            last_mouse_phys_y = phys_y;
-
                             let is_on_pet = pet_renderer.body_hit_test(position.x, position.y).unwrap_or(false);
                             is_pointer_on_pet = is_on_pet;
+                            pet_renderer.pointer_inside = is_on_pet;
 
-                            if is_on_pet && !was_pointer_on_pet {
-                                let now = std::time::Instant::now();
-                                let throttle = match last_hover_trigger_time {
-                                    Some(t) => now.duration_since(t) > std::time::Duration::from_secs(15),
-                                    None => true,
-                                };
-
-                                if throttle && pet_renderer.pet_state != "thinking" {
-                                    last_hover_trigger_time = Some(now);
-                                    last_interactive_time = now;
-                                    pet_renderer.add_emotion(0.18, 0.08);
-                                    if let Ok(mut mem) = memory.lock() {
-                                        mem.increment_touch();
-                                        mem.add_personality_note(touch_memory_note(&config.pet_style));
+                            let now = std::time::Instant::now();
+                            if let Some((sample_time, last_x, last_y)) = last_pointer_sample {
+                                let elapsed = now.duration_since(sample_time).as_secs_f64();
+                                if elapsed > 0.0 {
+                                    let dx = position.x - last_x;
+                                    let dy = position.y - last_y;
+                                    let velocity = (dx * dx + dy * dy).sqrt() / elapsed;
+                                    if is_on_pet && velocity > 1_800.0 {
+                                        surprised_timer = Some(now);
+                                        pet_renderer.add_emotion(-0.06, 0.28);
                                     }
-
-                                    let blush_phrases = touch_response_lines(&config.pet_style);
-                                    let idx = get_pseudo_random_index(blush_phrases.len());
-                                    bubble_renderer.set_text(blush_phrases[idx]);
-
-                                    bubble_timer = Some(now);
-                                    bubble_show_duration = std::time::Duration::from_secs(5);
-                                    window_for_run.request_redraw();
                                 }
                             }
-                            was_pointer_on_pet = is_on_pet;
+                            last_pointer_sample = Some((now, position.x, position.y));
+
                             window_for_run.request_redraw();
                         }
                         WindowEvent::CursorLeft { .. } => {
                             pet_renderer.pointer_inside = false;
                             is_pointer_on_pet = false;
+                            last_pointer_sample = None;
                             window_for_run.request_redraw();
                         }
                         _ => {}
@@ -1739,7 +2206,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             bubble_window_clone.request_redraw();
                         }
                         WindowEvent::RedrawRequested
-                            if bubble_timer.is_some() && bubble_renderer.has_text() =>
+                            if (bubble_timer.is_some()
+                                || bubble_reveal.is_some()
+                                || active_generation.as_ref().is_some_and(|session| {
+                                    session.kind == GenerationKind::Chat
+                                }))
+                                && bubble_renderer.has_text() =>
                         {
                             bubble_renderer.update_and_draw();
                             let skia_data = bubble_renderer.data();
@@ -1769,8 +2241,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             dialogs.show("Nimbus 使用帮助", &format!("{}\n\n• 聊天：托盘 → 和桌宠说句话\n• 重读：托盘 → 查看完整消息\n• 移动：按住桌宠身体拖动\n• 安静陪伴：关闭“主动说话（含梦话）”\n\n本地对话需要兼容的 GGUF 模型。在 ~/.nimbus_config.toml 中设置 model_path 为模型文件的绝对路径，保存后重启。无需模型也能离线陪伴。\n\n应用名称、活跃时段和成长记忆仅保存在 ~/.nimbus_memory.json；可在“主人记忆管理”中查看或清空。天气是手动设置，不代表实时天气。", mode));
                         }
                         "mutter_enabled" => {
-                            config.mutter_enabled = !config.mutter_enabled;
+                            config.mutter_enabled = tray_controls.mutter_enabled.is_checked();
+                            if !config.mutter_enabled && pending_behavior.as_ref().is_some_and(|request| matches!(request.event, BehaviorEvent::Ambient | BehaviorEvent::Dream)) {
+                                pending_behavior = None;
+                            }
                             config.save();
+                        }
+                        "mutter_interval_60"
+                        | "mutter_interval_180"
+                        | "mutter_interval_300" => {
+                            config.mutter_interval_secs = match id {
+                                "mutter_interval_60" => 60,
+                                "mutter_interval_300" => 300,
+                                _ => 180,
+                            };
+                            config.save();
+                            tray_controls.sync(&config);
+                            let entropy = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos();
+                            next_mutter_at = now
+                                + jittered_interval(config.mutter_interval_secs, entropy);
+                        }
+                        "touch_cooldown_5"
+                        | "touch_cooldown_15"
+                        | "touch_cooldown_30" => {
+                            config.touch_response_cooldown_secs = match id {
+                                "touch_cooldown_5" => 5,
+                                "touch_cooldown_30" => 30,
+                                _ => 15,
+                            };
+                            config.save();
+                            tray_controls.sync(&config);
+                        }
+                        "dream_interval_45"
+                        | "dream_interval_75"
+                        | "dream_interval_120" => {
+                            config.dream_interval_secs = match id {
+                                "dream_interval_45" => 45,
+                                "dream_interval_120" => 120,
+                                _ => 75,
+                            };
+                            config.save();
+                            tray_controls.sync(&config);
+                            let entropy = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos();
+                            next_dream_at = now
+                                + jittered_interval(
+                                    config.dream_interval_secs,
+                                    entropy.rotate_left(17),
+                                );
                         }
                         "action_rename" => {
                             dialogs.input(desktop::InputKind::Rename, "设置桌宠名字", "请输入新名字（最多 40 个字）：", &config.pet_name);
@@ -1812,13 +2335,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(ref engine) = llama_engine {
                                 let _ = engine.clear_history();
                             }
-                            if let Ok(mut mem) = memory.lock() {
+                            let cleared = if let Ok(mut mem) = memory.lock() {
                                 mem.clear();
-                                bubble_renderer.set_text("记忆已清空，我会重新认识你。");
-                                bubble_timer = Some(std::time::Instant::now());
-                                bubble_show_duration = std::time::Duration::from_secs(5);
-                                window_for_run.request_redraw();
                                 println!("\n>> 主人习惯记忆已重置。");
+                                true
+                            } else {
+                                false
+                            };
+                            if cleared {
+                                queue_contextual_behavior(
+                                    &mut pending_behavior,
+                                    BehaviorEvent::MemoryReset,
+                                    &config,
+                                    &memory,
+                                    &observer_state,
+                                );
+                                window_for_run.request_redraw();
                             }
                         }
                         "persona_default" => {
@@ -1827,9 +2359,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(ref engine) = llama_engine {
                                 let _ = engine.clear_history();
                             }
-                            bubble_renderer.set_text("语气调回柔和自然，我会继续观察你。");
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::PersonaShift,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "persona_tsundere" => {
@@ -1838,9 +2374,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(ref engine) = llama_engine {
                                 let _ = engine.clear_history();
                             }
-                            bubble_renderer.set_text("哼，才不是想让你陪我呢！");
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::PersonaShift,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "persona_toxic" => {
@@ -1849,9 +2389,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(ref engine) = llama_engine {
                                 let _ = engine.clear_history();
                             }
-                            bubble_renderer.set_text("今天的工作完成了吗？");
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::PersonaShift,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "persona_moe" => {
@@ -1860,9 +2404,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(ref engine) = llama_engine {
                                 let _ = engine.clear_history();
                             }
-                            bubble_renderer.set_text("我把语气放软一点，靠近陪你。");
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::PersonaShift,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "style_nimbus" => {
@@ -1873,9 +2421,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             pet_renderer.active_style = "nimbus".to_string();
                             bubble_renderer.active_style = "nimbus".to_string();
-                                bubble_renderer.set_text(style_switch_line("nimbus"));
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            resize_pet_window(
+                                &window_for_run,
+                                &mut wgpu_state,
+                                &mut pet_renderer,
+                                config.pet_size,
+                                &config.pet_style,
+                                config.font_size,
+                            );
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::BodyChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "style_mochi" => {
@@ -1886,9 +2446,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             pet_renderer.active_style = "mochi".to_string();
                             bubble_renderer.active_style = "mochi".to_string();
-                            bubble_renderer.set_text(style_switch_line("mochi"));
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            resize_pet_window(
+                                &window_for_run,
+                                &mut wgpu_state,
+                                &mut pet_renderer,
+                                config.pet_size,
+                                &config.pet_style,
+                                config.font_size,
+                            );
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::BodyChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "style_starlit" => {
@@ -1899,9 +2471,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             pet_renderer.active_style = "starlit".to_string();
                             bubble_renderer.active_style = "starlit".to_string();
-                            bubble_renderer.set_text(style_switch_line("starlit"));
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            resize_pet_window(
+                                &window_for_run,
+                                &mut wgpu_state,
+                                &mut pet_renderer,
+                                config.pet_size,
+                                &config.pet_style,
+                                config.font_size,
+                            );
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::BodyChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "style_crab" => {
@@ -1912,9 +2496,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             pet_renderer.active_style = "crab".to_string();
                             bubble_renderer.active_style = "crab".to_string();
-                            bubble_renderer.set_text(style_switch_line("crab"));
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            resize_pet_window(
+                                &window_for_run,
+                                &mut wgpu_state,
+                                &mut pet_renderer,
+                                config.pet_size,
+                                &config.pet_style,
+                                config.font_size,
+                            );
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::BodyChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
+                            window_for_run.request_redraw();
+                        }
+                        "style_luma" => {
+                            config.pet_style = "luma".to_string();
+                            config.save();
+                            if let Some(ref engine) = llama_engine {
+                                let _ = engine.clear_history();
+                            }
+                            pet_renderer.active_style = "luma".to_string();
+                            bubble_renderer.active_style = "luma".to_string();
+                            resize_pet_window(
+                                &window_for_run,
+                                &mut wgpu_state,
+                                &mut pet_renderer,
+                                config.pet_size,
+                                &config.pet_style,
+                                config.font_size,
+                            );
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::BodyChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "weather_sunny" => {
@@ -1922,9 +2543,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             config.save();
                             pet_renderer.active_weather = "sunny".to_string();
                             bubble_renderer.active_weather = "sunny".to_string();
-                            bubble_renderer.set_text(weather_feedback_line(&config.pet_style, "sunny"));
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::WeatherChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "weather_windy" => {
@@ -1932,9 +2557,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             config.save();
                             pet_renderer.active_weather = "windy".to_string();
                             bubble_renderer.active_weather = "windy".to_string();
-                            bubble_renderer.set_text(weather_feedback_line(&config.pet_style, "windy"));
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::WeatherChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "weather_rainy" => {
@@ -1942,9 +2571,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             config.save();
                             pet_renderer.active_weather = "rainy".to_string();
                             bubble_renderer.active_weather = "rainy".to_string();
-                            bubble_renderer.set_text(weather_feedback_line(&config.pet_style, "rainy"));
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::WeatherChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "weather_snowy" => {
@@ -1952,40 +2585,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             config.save();
                             pet_renderer.active_weather = "snowy".to_string();
                             bubble_renderer.active_weather = "snowy".to_string();
-                            bubble_renderer.set_text(weather_feedback_line(&config.pet_style, "snowy"));
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::WeatherChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
-                        "size_150" | "size_200" | "size_250" | "size_300" => {
+                        "size_150" | "size_200" | "size_250" | "size_300" | "size_350" => {
                             let new_size = match id {
                                 "size_150" => 150,
                                 "size_200" => 200,
                                 "size_250" => 250,
                                 "size_300" => 300,
+                                "size_350" => 350,
                                 _ => 200,
                             };
                             config.pet_size = new_size;
                             config.save();
 
-                            let new_height = (new_size as f32 * 0.55) as u32;
-                            let pet_scale = window_for_run.scale_factor();
-                            let p_w_phys = (new_size as f64 * pet_scale).round() as u32;
-                            let p_h_phys = (new_height as f64 * pet_scale).round() as u32;
-                            let requested = window_for_run.request_inner_size(
-                                winit::dpi::LogicalSize::new(new_size as f64, new_height as f64),
+                            resize_pet_window(
+                                &window_for_run,
+                                &mut wgpu_state,
+                                &mut pet_renderer,
+                                new_size,
+                                &config.pet_style,
+                                config.font_size,
                             );
-                            let target_size = requested.unwrap_or_else(|| {
-                                winit::dpi::PhysicalSize::new(p_w_phys, p_h_phys)
-                            });
-                            wgpu_state.resize(target_size.width.max(1), target_size.height.max(1));
-                            pet_renderer.scale_factor = pet_scale as f32;
-                            pet_renderer.resize(target_size.width.max(1), target_size.height.max(1));
-                            pet_renderer.set_font_size(config.font_size);
 
-                            bubble_renderer.set_text(&format!("✨ 身体缩放完成！当前尺寸：{} 像素", new_size));
-                            bubble_timer = Some(std::time::Instant::now());
-                            bubble_show_duration = std::time::Duration::from_secs(5);
+                            queue_contextual_behavior(
+                                &mut pending_behavior,
+                                BehaviorEvent::BodyChanged,
+                                &config,
+                                &memory,
+                                &observer_state,
+                            );
                             window_for_run.request_redraw();
                         }
                         "font_20" => {
@@ -2054,82 +2690,263 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         _ => {}
                     }
+                    tray_controls.sync(&config);
                 }
 
-                // Periodic Muttering: Check if idle for > 3 minutes (180 seconds)
-                if config.mutter_enabled && now.duration_since(last_interactive_time) > std::time::Duration::from_secs(180) && bubble_timer.is_none() {
-                    last_interactive_time = now;
+                use mouse_position::mouse_position::Mouse;
+                let mut global_pointer_on_pet = false;
+                if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                    if last_global_pointer_position != Some((x, y)) {
+                        last_global_pointer_position = Some((x, y));
+                        last_global_pointer_motion = now;
+                    }
+                    if let Ok(win_pos) = window_for_run.outer_position() {
+                        let local_x = x as f64 - win_pos.x as f64;
+                        let local_y = y as f64 - win_pos.y as f64;
+                        cursor_position = winit::dpi::PhysicalPosition::new(local_x, local_y);
+                        set_pet_pointer_from_physical(
+                            &mut pet_renderer,
+                            window_for_run.inner_size(),
+                            local_x,
+                            local_y,
+                        );
+                        global_pointer_on_pet = pet_renderer
+                            .body_hit_test(local_x, local_y)
+                            .unwrap_or(false);
+                    }
+                }
+                is_pointer_on_pet = global_pointer_on_pet;
+                pet_renderer.pointer_inside = global_pointer_on_pet;
 
-                    if let Some(ref engine) = llama_engine {
-                        if engine.is_model_online() {
-                            let (app, hour) = {
-                                if let Ok(guard) = observer_state.lock() {
-                                    guard.clone()
-                                } else {
-                                    ("未知应用".to_string(), 12)
-                                }
-                            };
-
-
-                            let short_persona = match config.persona.as_str() {
-                                "tsundere" => "傲娇别扭，嘴硬心软",
-                                "toxic" => "毒舌犀利，幽默吐槽",
-                                "moe" => "极其软萌，超甜粘人",
-                                _ => "活泼可爱，贴贴治愈",
-                            };
-                            let short_style = match config.pet_style.as_str() {
-                                "mochi" => "抹茶小猫（喜欢喵喵叫，说话带‘喵~’）",
-                                "starlit" => "太空章鱼（喜欢挥舞触手、咕噜噜吐泡泡）",
-                                "crab" => "红色小螃蟹（喜欢横着走、剪螯发出咔嚓声）",
-                                "nimbus" => "云朵精灵（喜欢在空中飘浮、说话轻飘飘）",
-                                _ => "可爱的桌宠",
-                            };
-                            let short_weather = match config.weather_mode.as_str() {
-                                "sunny" => "晴天☀️",
-                                "windy" => "刮大风💨",
-                                "rainy" => "下雨🌧️",
-                                "snowy" => "下雪❄️",
-                                _ => "晴天",
-                            };
-                            let prompt = format!(
-                                "你是桌宠{}，性格是[{}]，外观是[{}]。主人当前在前台用[{}]，时间是{}点，你的天气是{}。请配合设定自发无聊说一句话，绝对不要有任何格式，不能有英文，不超过15个字！",
-                                config.pet_name, short_persona, short_style, app, hour, short_weather
-                            );
-
-                            let engine_clone = engine.clone();
-                            let tx_clone = tx.clone();
-
-                            tokio::spawn(async move {
-                                if let Ok(mut stream) = engine_clone.generate_mutter_stream(&prompt).await {
-                                    while let Some(chunk) = stream.next().await {
-                                        let _ = tx_clone.send(chunk).await;
-                                    }
-                                    let _ = tx_clone.send("[DONE]".to_string()).await;
-                                } else {
-                                    let _ = tx_clone.send("[OFFLINE]".to_string()).await;
-                                }
-                            });
+                if config.click_through_when_idle {
+                    let desired_hittest = global_pointer_on_pet || is_dragging_pet;
+                    if desired_hittest != pet_hittest_enabled {
+                        if let Err(err) = window_for_run.set_cursor_hittest(desired_hittest) {
+                            eprintln!("Failed to update pet hit testing: {err:?}");
                         } else {
-                            let (app, hour) = {
-                                if let Ok(guard) = observer_state.lock() {
-                                    guard.clone()
-                                } else {
-                                    ("未知应用".to_string(), 12)
-                                }
-                            };
-                            let mutter = get_offline_mutter(&app, hour, &config.pet_style);
-                            bubble_renderer.set_text(&mutter);
-                            bubble_timer = Some(now);
-                            bubble_show_duration = std::time::Duration::from_secs(8);
-                            window_for_run.request_redraw();
+                            pet_hittest_enabled = desired_hittest;
                         }
                     }
                 }
 
-                let is_active = pet_renderer.pointer_inside
+                if global_pointer_on_pet && !was_pointer_on_pet {
+                    let throttle = last_hover_trigger_time
+                        .map(|last| {
+                            now.duration_since(last)
+                                > std::time::Duration::from_secs(
+                                    config.touch_response_cooldown_secs,
+                                )
+                        })
+                        .unwrap_or(true);
+                    if throttle {
+                        last_hover_trigger_time = Some(now);
+                        last_interactive_time = now;
+                        pet_renderer.add_emotion(0.18, 0.08);
+                        if let Ok(mut mem) = memory.lock() {
+                            mem.increment_touch();
+                            mem.add_personality_note(touch_memory_note(&config.pet_style));
+                        }
+                        let (app, hour) = observer_state
+                            .lock()
+                            .map(|guard| guard.clone())
+                            .unwrap_or_else(|_| ("未知应用".to_string(), 12));
+                        let context = behavior_context(&config, &memory, app, hour);
+                        if active_generation.is_none() {
+                            if let Some(ref engine) = llama_engine {
+                                active_response.clear();
+                                filter = think_filter::ThinkBlockFilter::new(
+                                    config.expose_think,
+                                    false,
+                                );
+                                in_thinking_block = false;
+                                spawn_behavior_generation(
+                                    engine.clone(),
+                                    tx.clone(),
+                                    BehaviorEvent::Touch,
+                                    context.clone(),
+                                    false,
+                                );
+                                active_generation = Some(ActiveGeneration {
+                                    kind: GenerationKind::Behavior(BehaviorEvent::Touch),
+                                    context: Some(context),
+                                    retry_count: 0,
+                                    started_at: std::time::Instant::now(),
+                                });
+                            } else {
+                                active_response = fallback_for_behavior(
+                                    BehaviorEvent::Touch,
+                                    &config.pet_style,
+                                    &config.weather_mode,
+                                    "未知应用",
+                                    hour,
+                                );
+                                bubble_reveal = Some(TextReveal::new(
+                                    active_response.clone(),
+                                    now,
+                                    BehaviorEvent::Touch.display_duration(),
+                                ));
+                            }
+                        } else {
+                            queue_behavior(
+                                &mut pending_behavior,
+                                PendingBehavior {
+                                    event: BehaviorEvent::Touch,
+                                    context,
+                                },
+                            );
+                        }
+                        let entropy = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos();
+                        next_mutter_at = now
+                            + jittered_interval(config.mutter_interval_secs, entropy);
+                        next_dream_at = now
+                            + jittered_interval(
+                                config.dream_interval_secs,
+                                entropy.rotate_left(17),
+                            );
+                    }
+                }
+                was_pointer_on_pet = global_pointer_on_pet;
+
+                if active_generation.is_none() {
+                    if let Some(request) = pending_behavior.take() {
+                        if let Some(ref engine) = llama_engine {
+                            active_response.clear();
+                            filter = think_filter::ThinkBlockFilter::new(
+                                config.expose_think,
+                                false,
+                            );
+                            in_thinking_block = false;
+                            spawn_behavior_generation(
+                                engine.clone(),
+                                tx.clone(),
+                                request.event,
+                                request.context.clone(),
+                                false,
+                            );
+                            active_generation = Some(ActiveGeneration {
+                                kind: GenerationKind::Behavior(request.event),
+                                context: Some(request.context),
+                                retry_count: 0,
+                                started_at: std::time::Instant::now(),
+                            });
+                        } else {
+                            active_response = fallback_for_behavior(
+                                request.event,
+                                &config.pet_style,
+                                &request.context.weather,
+                                &request.context.app,
+                                request.context.hour,
+                            );
+                            bubble_reveal = Some(TextReveal::new(
+                                active_response.clone(),
+                                now,
+                                request.event.display_duration(),
+                            ));
+                        }
+                    }
+                }
+
+                let sleeping = state_machine.current() == PetState::Sleeping;
+                if sleeping && !was_sleeping {
+                    let entropy = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos();
+                    next_dream_at = now
+                        + jittered_interval(config.dream_interval_secs, entropy.rotate_left(17));
+                }
+                was_sleeping = sleeping;
+
+                let ready_for_autonomy = active_generation.is_none()
+                    && pending_behavior.is_none()
+                    && bubble_reveal.is_none()
+                    && bubble_timer.is_none();
+                let due_event = if ready_for_autonomy && config.mutter_enabled && sleeping && now >= next_dream_at {
+                    Some(BehaviorEvent::Dream)
+                } else if ready_for_autonomy
+                    && !sleeping
+                    && config.mutter_enabled
+                    && now >= next_mutter_at
+                {
+                    Some(BehaviorEvent::Ambient)
+                } else {
+                    None
+                };
+
+                if let Some(event) = due_event {
+                    let (app, hour) = observer_state
+                        .lock()
+                        .map(|guard| guard.clone())
+                        .unwrap_or_else(|_| ("未知应用".to_string(), 12));
+                    let context = behavior_context(&config, &memory, app, hour);
+                    if event == BehaviorEvent::Dream {
+                        if let Ok(mut mem) = memory.lock() {
+                            mem.increment_dreams();
+                        }
+                    }
+                    if let Some(ref engine) = llama_engine {
+                        active_response.clear();
+                        filter = think_filter::ThinkBlockFilter::new(
+                            config.expose_think,
+                            false,
+                        );
+                        in_thinking_block = false;
+                        spawn_behavior_generation(
+                            engine.clone(),
+                            tx.clone(),
+                            event,
+                            context.clone(),
+                            false,
+                        );
+                        active_generation = Some(ActiveGeneration {
+                            kind: GenerationKind::Behavior(event),
+                            context: Some(context),
+                            retry_count: 0,
+                            started_at: std::time::Instant::now(),
+                        });
+                    } else {
+                        active_response = fallback_for_behavior(
+                            event,
+                            &config.pet_style,
+                            &context.weather,
+                            &context.app,
+                            context.hour,
+                        );
+                        bubble_reveal = Some(TextReveal::new(
+                            active_response.clone(),
+                            now,
+                            event.display_duration(),
+                        ));
+                    }
+                    let entropy = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos();
+                    if event == BehaviorEvent::Dream {
+                        next_dream_at = now
+                            + jittered_interval(
+                                config.dream_interval_secs,
+                                entropy.rotate_left(17),
+                            );
+                    } else {
+                        next_mutter_at = now
+                            + jittered_interval(config.mutter_interval_secs, entropy);
+                    }
+                }
+
+                let is_active = is_pointer_on_pet
                     || pet_renderer.pet_state == "thinking"
-                    || is_muttering
-                    || bubble_timer.is_some();
+                    || pet_renderer.pet_state == "muttering"
+                    || pet_renderer.pet_state == "surprised"
+                    || active_generation.is_some()
+                    || bubble_reveal.is_some()
+                    || now.duration_since(last_state_change)
+                        < std::time::Duration::from_millis(900)
+                    || now.duration_since(last_global_pointer_motion)
+                        < std::time::Duration::from_millis(450);
                 let interval = if is_active {
                     std::time::Duration::from_millis(33)
                 } else {
@@ -2138,7 +2955,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if now.duration_since(last_draw_time) >= interval {
                     window_for_run.request_redraw();
-                    if bubble_window_clone.is_visible().unwrap_or(false) {
+                    if bubble_reveal.is_some()
+                        || active_generation.as_ref().is_some_and(|session| {
+                            session.kind == GenerationKind::Chat
+                        })
+                    {
                         bubble_window_clone.request_redraw();
                     }
                 }
@@ -2191,6 +3012,28 @@ mod tests {
     }
 
     #[test]
+    fn luma_local_fallbacks_and_prompt_keep_the_rabbit_identity() {
+        let prompt = get_persona_prompt("default", "luma", "Nimbus", "snowy");
+        assert!(prompt.contains("月灯兔"));
+        assert!(prompt.contains("长耳朵"));
+        assert!(!prompt.contains("Nimbus"));
+
+        for line in [
+            startup_fallback_line("luma"),
+            style_switch_line("luma"),
+            weather_feedback_line("luma", "sunny"),
+            weather_feedback_line("luma", "windy"),
+            weather_feedback_line("luma", "rainy"),
+            weather_feedback_line("luma", "snowy"),
+        ] {
+            assert_no_crab_identity_leak_for_style(line, "luma");
+        }
+        for line in touch_response_lines("luma") {
+            assert_no_crab_identity_leak_for_style(line, "luma");
+        }
+    }
+
+    #[test]
     fn persona_prompt_suppresses_legacy_default_name() {
         let prompt = get_persona_prompt("default", "nimbus", "Nimbus", "sunny");
 
@@ -2207,107 +3050,104 @@ mod tests {
     }
 
     #[test]
-    fn startup_line_filters_name_and_wrong_identity() {
-        let raw = "（醒来时的动作）\n我——Nimbus！\n小云朵醒来啦\n小螃蟹举起大螯";
+    fn typewriter_reveal_advances_without_skipping_characters() {
+        let start = std::time::Instant::now();
+        let mut reveal = TextReveal::new(
+            "螃蟹挥挥小螯".to_string(),
+            start,
+            std::time::Duration::from_secs(7),
+        );
 
-        assert_eq!(clean_startup_line(raw, "crab"), "小螃蟹举起大螯");
-    }
-
-    #[test]
-    fn startup_line_falls_back_to_style_when_model_only_self_intros() {
-        let raw = "我叫 Nimbus\n我是桌宠 Nimbus";
-
+        assert_eq!(reveal.advance(start).as_deref(), Some("螃"));
         assert_eq!(
-            clean_startup_line(raw, "crab"),
-            startup_fallback_line("crab")
+            reveal.advance(start + std::time::Duration::from_millis(10)),
+            None
+        );
+        assert_eq!(
+            reveal
+                .advance(start + std::time::Duration::from_millis(50))
+                .as_deref(),
+            Some("螃蟹")
         );
     }
 
     #[test]
-    fn startup_line_filters_self_intro_and_case_variants() {
-        let raw = "我是 nimbus，刚刚醒来\n我叫灵霓\n小螃蟹横着挪了一步";
+    fn queued_touch_replaces_lower_priority_ambient_behavior() {
+        let context = BehaviorContext {
+            pet_style: "crab".to_string(),
+            persona: "default".to_string(),
+            weather: "sunny".to_string(),
+            app: "Finder".to_string(),
+            hour: 12,
+            memory_summary: String::new(),
+            recent_lines: Vec::new(),
+        };
+        let mut pending = Some(PendingBehavior {
+            event: BehaviorEvent::Ambient,
+            context: context.clone(),
+        });
+        queue_behavior(
+            &mut pending,
+            PendingBehavior {
+                event: BehaviorEvent::Touch,
+                context,
+            },
+        );
 
-        assert_eq!(clean_startup_line(raw, "crab"), "小螃蟹横着挪了一步");
+        assert_eq!(pending.unwrap().event, BehaviorEvent::Touch);
     }
 
     #[test]
-    fn startup_prompt_avoids_fixed_name_intro() {
-        let prompt =
-            build_startup_prompt("你记得自己最近说过：Nimbus 今天也上线了。", "crab", "sunny");
-
-        assert!(!prompt.contains("Nimbus"));
-        assert!(prompt.contains("不像自我介绍"));
-        assert!(prompt.contains("小螃蟹"));
+    fn pet_window_size_is_tight_but_preserves_nominal_visual_scale() {
+        assert_eq!(pet_window_logical_size(150, "crab"), (132, 75));
+        assert_eq!(pet_window_logical_size(300, "mochi"), (264, 150));
+        assert_eq!(pet_window_logical_size(350, "crab"), (308, 175));
+        assert_eq!(pet_window_logical_size(350, "nimbus"), (308, 189));
     }
 
     #[tokio::test]
-    #[ignore = "requires a configured local GGUF model"]
+    #[ignore = "requires the local MiniCPM model and Metal runtime"]
     async fn test_model_mutter_generation_robustness() {
-        let model_path = std::path::PathBuf::from("/Users/jinliang/.lmstudio/models/openbmb/MiniCPM5-1B-GGUF/MiniCPM5-1B-Q4_K_M.gguf");
+        let model_path = std::path::PathBuf::from(
+            "/Users/jinliang/.lmstudio/models/openbmb/MiniCPM5-1B-GGUF/MiniCPM5-1B-Q4_K_M.gguf",
+        );
         if !model_path.exists() {
             println!("Skipping Llama model test: model file not found.");
             return;
         }
 
         let engine = LlamaEngine::new(model_path, 30).expect("Failed to init LlamaEngine");
-        
-        let styles = ["crab", "mochi", "starlit", "nimbus"];
+
+        let styles = ["crab", "mochi", "starlit", "nimbus", "luma"];
         let weather_modes = ["sunny", "windy", "rainy", "snowy"];
         let personas = ["tsundere", "toxic", "moe", "default"];
-        
-        use tokio_stream::StreamExt;
 
         for (i, style) in styles.iter().enumerate() {
             let weather = weather_modes[i % weather_modes.len()];
             let persona = personas[i % personas.len()];
-            
-            let short_persona = match persona {
-                "tsundere" => "傲娇别扭，嘴硬心软",
-                "toxic" => "毒舌犀利，幽默吐槽",
-                "moe" => "极其软萌，超甜粘人",
-                _ => "活泼可爱，贴贴治愈",
+            let context = BehaviorContext {
+                pet_style: (*style).to_string(),
+                persona: persona.to_string(),
+                weather: weather.to_string(),
+                app: "Code".to_string(),
+                hour: 14,
+                memory_summary: "对方正在写代码，最近喜欢安静陪伴。".to_string(),
+                recent_lines: Vec::new(),
             };
-            let short_style = match *style {
-                "mochi" => "抹茶小猫（喜欢喵喵叫，说话带‘喵~’）",
-                "starlit" => "太空章鱼（喜欢挥舞触手、咕噜噜吐泡泡）",
-                "crab" => "红色小螃蟹（喜欢横着走、剪螯发出咔嚓声）",
-                "nimbus" => "云朵精灵（喜欢在空中飘浮、说话轻飘飘）",
-                _ => "可爱的桌宠",
-            };
-            let short_weather = match weather {
-                "sunny" => "晴天☀️",
-                "windy" => "刮大风💨",
-                "rainy" => "下雨🌧️",
-                "snowy" => "下雪❄️",
-                _ => "晴天",
-            };
-            let prompt = format!(
-                "你是桌宠Nimbus，性格是[{}]，外观是[{}]。主人当前在前台用[Code]，时间是14点，你的天气是{}。请配合设定自发无聊说一句话，绝对不要有任何格式，不能有英文，不超过15个字！",
-                short_persona, short_style, short_weather
-            );
-            
-            println!("=== Testing style: {}, weather: {}, persona: {} ===", style, weather, persona);
-            
-            let mut stream = engine.generate_mutter_stream(&prompt).await.expect("Failed to generate mutter");
+            let prompt = build_behavior_prompt(BehaviorEvent::Ambient, &context, false);
+
+            let mut stream = engine
+                .generate_mutter_stream(&prompt)
+                .await
+                .expect("Failed to generate mutter");
             let mut response = String::new();
-            while let Some(chunk) = tokio_stream::StreamExt::next(&mut stream).await {
+            while let Some(chunk) = stream.next().await {
                 response.push_str(&chunk);
             }
-            
-            println!("Raw generated mutter: {:?}", response);
-            let fallback = get_offline_mutter("Code", 14, style);
-            let cleaned = clean_mutter_line(&response, style, &fallback);
-            println!("Cleaned mutter: {:?}", cleaned);
-            
+
+            let cleaned = clean_behavior_line(&response, BehaviorEvent::Ambient, style, 14, &[])
+                .unwrap_or_else(|| get_offline_mutter("Code", 14, style));
             assert!(!cleaned.is_empty(), "Mutter should not be empty");
-            
-            let repeats = ["Hi", "Hello", "Crunch", "hi", "hello", "crunch", "嗝", "嘟", "哈"];
-            for r in repeats {
-                let count = cleaned.matches(r).count();
-                assert!(count < 3, "Cleaned mutter contains too many repeated words {:?}: {:?}", r, cleaned);
-            }
-            
-            assert!(!cleaned.contains('/') && !cleaned.contains('\\'), "Cleaned mutter contains weird formatting slashes: {:?}", cleaned);
             assert_no_crab_identity_leak_for_style(&cleaned, style);
         }
     }
@@ -2316,18 +3156,54 @@ mod tests {
         let t = text.to_lowercase();
         match style {
             "crab" => {
-                assert!(!t.contains("云") && !t.contains("猫") && !t.contains("喵") && !t.contains("章鱼"), "crab leaked: {text}");
+                assert!(
+                    !t.contains("云")
+                        && !t.contains("猫")
+                        && !t.contains("喵")
+                        && !t.contains("章鱼"),
+                    "crab leaked: {text}"
+                );
             }
             "mochi" => {
-                assert!(!t.contains("螃蟹") && !t.contains("螯") && !t.contains("云") && !t.contains("章鱼"), "mochi leaked: {text}");
+                assert!(
+                    !t.contains("螃蟹")
+                        && !t.contains("螯")
+                        && !t.contains("云")
+                        && !t.contains("章鱼"),
+                    "mochi leaked: {text}"
+                );
             }
             "starlit" => {
-                assert!(!t.contains("螃蟹") && !t.contains("螯") && !t.contains("猫") && !t.contains("喵") && !t.contains("云"), "starlit leaked: {text}");
+                assert!(
+                    !t.contains("螃蟹")
+                        && !t.contains("螯")
+                        && !t.contains("猫")
+                        && !t.contains("喵")
+                        && !t.contains("云"),
+                    "starlit leaked: {text}"
+                );
+            }
+            "luma" => {
+                assert!(
+                    !t.contains("螃蟹")
+                        && !t.contains("螯")
+                        && !t.contains("猫")
+                        && !t.contains("喵")
+                        && !t.contains("章鱼")
+                        && !t.contains("云"),
+                    "luma leaked: {text}"
+                );
             }
             _ => {
-                assert!(!t.contains("螃蟹") && !t.contains("螯") && !t.contains("猫") && !t.contains("喵") && !t.contains("章鱼"), "nimbus leaked: {text}");
+                assert!(
+                    !t.contains("螃蟹")
+                        && !t.contains("螯")
+                        && !t.contains("猫")
+                        && !t.contains("喵")
+                        && !t.contains("章鱼"),
+                    "nimbus leaked: {text}"
+                );
             }
         }
     }
 }
-

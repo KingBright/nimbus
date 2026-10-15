@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PetState {
@@ -165,6 +165,48 @@ pub fn transition_delay(from: PetState, to: PetState) -> Duration {
     }
 }
 
+pub struct StateMachine {
+    current: PetState,
+    candidate: PetState,
+    candidate_since: Instant,
+}
+
+impl StateMachine {
+    pub fn new(initial: PetState, now: Instant) -> Self {
+        Self {
+            current: initial,
+            candidate: initial,
+            candidate_since: now,
+        }
+    }
+
+    pub fn current(&self) -> PetState {
+        self.current
+    }
+
+    pub fn update(&mut self, target: PetState, now: Instant) -> PetState {
+        if target == self.current {
+            self.candidate = target;
+            self.candidate_since = now;
+            return self.current;
+        }
+
+        if target != self.candidate {
+            self.candidate = target;
+            self.candidate_since = now;
+            return self.current;
+        }
+
+        if now.saturating_duration_since(self.candidate_since)
+            >= transition_delay(self.current, target)
+        {
+            self.current = target;
+            self.candidate_since = now;
+        }
+        self.current
+    }
+}
+
 pub fn decide_state(ctx: &StateContext<'_>) -> PetState {
     if ctx.surprised {
         PetState::Surprised
@@ -263,5 +305,52 @@ mod tests {
     fn sleeping_transition_is_deliberate() {
         assert!(transition_delay(PetState::Idle, PetState::Sleeping) >= Duration::from_secs(10));
         assert!(transition_delay(PetState::Sleeping, PetState::Idle) >= Duration::from_millis(800));
+    }
+
+    #[test]
+    fn state_machine_ignores_single_frame_touch_noise() {
+        let start = Instant::now();
+        let mut machine = StateMachine::new(PetState::Idle, start);
+
+        assert_eq!(machine.update(PetState::Tickled, start), PetState::Idle);
+        assert_eq!(
+            machine.update(PetState::Idle, start + Duration::from_millis(20)),
+            PetState::Idle
+        );
+        assert_eq!(machine.current(), PetState::Idle);
+    }
+
+    #[test]
+    fn state_machine_commits_stable_touch_then_wakes_gently() {
+        let start = Instant::now();
+        let mut machine = StateMachine::new(PetState::Idle, start);
+
+        machine.update(PetState::Tickled, start);
+        assert_eq!(
+            machine.update(PetState::Tickled, start + Duration::from_millis(300)),
+            PetState::Tickled
+        );
+
+        machine.update(PetState::Idle, start + Duration::from_millis(310));
+        assert_eq!(
+            machine.update(PetState::Idle, start + Duration::from_millis(800)),
+            PetState::Idle
+        );
+    }
+
+    #[test]
+    fn state_machine_does_not_sleep_on_a_transient_candidate() {
+        let start = Instant::now();
+        let mut machine = StateMachine::new(PetState::Idle, start);
+
+        machine.update(PetState::Sleeping, start);
+        assert_eq!(
+            machine.update(PetState::Sleeping, start + Duration::from_secs(5)),
+            PetState::Idle
+        );
+        assert_eq!(
+            machine.update(PetState::Idle, start + Duration::from_secs(6)),
+            PetState::Idle
+        );
     }
 }
