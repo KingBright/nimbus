@@ -7,7 +7,11 @@ use winit::{
     window::WindowBuilder,
 };
 
+mod art;
 mod config;
+mod desktop;
+mod placement;
+mod storage;
 mod llama_engine;
 mod memory;
 mod renderer;
@@ -779,23 +783,26 @@ fn get_offline_mutter(app: &str, hour: u32, pet_style: &str) -> String {
 }
 
 fn create_tray_icon() -> tray_icon::Icon {
-    let mut rgba = vec![0u8; 16 * 16 * 4];
-    for y in 0..16 {
-        for x in 0..16 {
-            let idx = (y * 16 + x) * 4;
-            // Draw a cute cloud shape
-            let dx = x as f32 - 8.0;
-            let dy = y as f32 - 8.0;
-            let dist = (dx * dx + dy * dy).sqrt();
-            if dist < 5.0 || ((7..=11).contains(&y) && (3..=13).contains(&x)) {
-                rgba[idx] = 135;
-                rgba[idx + 1] = 206;
-                rgba[idx + 2] = 250;
-                rgba[idx + 3] = 255;
-            }
-        }
-    }
-    tray_icon::Icon::from_rgba(rgba, 16, 16).unwrap()
+    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+    let mut pixmap = Pixmap::new(18, 18).unwrap();
+    let mut path = PathBuilder::new();
+    path.move_to(7.0, 24.0);
+    path.cubic_to(0.5, 24.0, 0.5, 14.5, 6.5, 13.0);
+    path.cubic_to(5.0, 6.0, 13.5, 3.5, 17.5, 8.0);
+    path.cubic_to(24.0, 3.5, 29.0, 8.0, 27.0, 14.0);
+    path.cubic_to(33.5, 16.5, 31.0, 24.0, 25.0, 24.0);
+    path.close();
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(0, 0, 0, 255);
+    paint.anti_alias = true;
+    let transform = Transform::from_scale(18.0 / 32.0, 18.0 / 32.0);
+    pixmap.fill_path(&path.finish().unwrap(), &paint, FillRule::Winding, transform, None);
+    let mut eyes = PathBuilder::new();
+    eyes.push_circle(12.0, 16.0, 1.35);
+    eyes.push_circle(21.0, 16.0, 1.35);
+    paint.blend_mode = tiny_skia::BlendMode::Clear;
+    pixmap.fill_path(&eyes.finish().unwrap(), &paint, FillRule::Winding, transform, None);
+    tray_icon::Icon::from_rgba(pixmap.data().to_vec(), 18, 18).unwrap()
 }
 
 fn get_persona_prompt(
@@ -831,38 +838,6 @@ fn get_persona_prompt(
     format!("{} {} 当前环境天气是：[{}]。请结合当前外观、性格和天气，直接说一句自然中文台词，优先写具体身体动作、观察或情绪，避免解释设定或提到提示词。", base_desc, style_desc, weather_desc)
 }
 
-fn prompt_for_pet_name(current_name: &str) -> Option<String> {
-    let script = format!(
-        "display dialog \"请输入桌宠的新名字:\" default answer \"{}\" with title \"设置桌宠名字\" with icon note",
-        current_name
-    );
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(pos) = stdout.find("text returned:") {
-            let name = stdout[pos + "text returned:".len()..].trim().to_string();
-            if !name.is_empty() {
-                return Some(name);
-            }
-        }
-    }
-    None
-}
-
-fn show_system_dialog(title: &str, message: &str) {
-    let script = format!(
-        "display dialog \"{}\" with title \"{}\" buttons {{\"好的\"}} default button \"好的\" with icon note",
-        message, title
-    );
-    let _ = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .status();
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -880,10 +855,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build System Tray
     let _tray_icon = {
         let menu = Menu::new();
+        let model_label = match config.model_path.as_ref() {
+            Some(path) if path.is_file() => "对话模式：本地模型",
+            Some(_) => "对话模式：模型文件不存在",
+            None => "对话模式：未配置模型 · 可离线陪伴",
+        };
+        menu.append(&MenuItem::with_id("model_status", model_label, false, None)).unwrap();
+        menu.append(&MenuItem::with_id("action_chat", "和桌宠说句话…", true, None)).unwrap();
+        menu.append(&MenuItem::with_id("action_last_message", "查看完整消息…", true, None)).unwrap();
+        menu.append(&MenuItem::with_id("action_help", "使用帮助…", true, None)).unwrap();
+        menu.append(&PredefinedMenuItem::separator()).unwrap();
 
         let mutter_check = CheckMenuItem::with_id(
             "mutter_enabled",
-            "开启自言自语",
+            "主动说话（含梦话）",
             true,
             config.mutter_enabled,
             None,
@@ -970,6 +955,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_menu(Box::new(menu))
             .with_tooltip("灵霓 Nimbus 桌宠控制面板")
             .with_icon(create_tray_icon())
+            .with_icon_as_template(true)
             .build()
             .unwrap()
     };
@@ -1025,8 +1011,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(monitor) = window.current_monitor() {
         let screen_size = monitor.size();
         let scale_factor = window.scale_factor();
-        let x = screen_size.width - (pet_win_width as f64 * scale_factor) as u32 - 50;
-        let y = screen_size.height - (pet_win_height as f64 * scale_factor) as u32 - 100;
+        let origin = monitor.position();
+        let (x, y) = placement::default_pet_position(
+            placement::ScreenRect { x: origin.x, y: origin.y, width: screen_size.width, height: screen_size.height },
+            ((pet_win_width as f64 * scale_factor) as u32, (pet_win_height as f64 * scale_factor) as u32),
+            (50, 100),
+        );
         window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
     }
 
@@ -1123,11 +1113,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Channels for text streaming and terminal input
     let (tx, mut rx) = mpsc::channel::<String>(100);
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(100);
+    let ui_input_tx = stdin_tx.clone();
+    let dialogs = desktop::DesktopDialogs::new();
+    let mut last_message = startup_fallback_line(&config.pet_style).to_string();
     let mut active_response = String::new();
     let mut is_startup_generation = false;
 
     // 6. Spawn Stdin non-blocking reader task
     let idle_sec_hint = config.idle_offload_secs;
+    let model_configured = llama_engine.is_some();
     let pet_name_clone = config.pet_name.clone();
     tokio::spawn(async move {
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -1137,7 +1131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("==================================================");
         println!("      桌宠 {} 极速推理与资源优化版       ", pet_name_clone);
         println!("==================================================");
-        println!("* 一体化单进程推理已加载。");
+        println!("* {}", if model_configured { "本地模型已配置。" } else { "当前为离线陪伴模式；模型配置方法见托盘“使用帮助”。" });
         println!("* 闲置 {} 秒将自动释放 GPU 显存 / 内存。", idle_sec_hint);
         println!("* 在此终端输入文字按 [回车] 即可与屏幕桌宠聊天。");
         println!("* 输入 /clear 清空上下文，输入 /exit 退出程序。");
@@ -1233,6 +1227,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         was_online = is_online;
 
+        while let Some(result) = dialogs.try_recv() {
+            match result {
+                desktop::DialogResult::Input(desktop::InputKind::Chat, text) => {
+                    if ui_input_tx.try_send(text).is_err() {
+                        dialogs.show("消息队列已满", "请等当前回复完成后再试。");
+                    }
+                }
+                desktop::DialogResult::Input(desktop::InputKind::Rename, name) => {
+                    if name.chars().count() > 40 {
+                        dialogs.show("名字太长了", "请使用不超过 40 个字的名字。");
+                        continue;
+                    }
+                    config.pet_name = name;
+                    config.save();
+                    window_for_run.request_redraw();
+                }
+                desktop::DialogResult::Failed => {
+                    eprintln!("Unable to open native dialog; terminal input remains available.");
+                    bubble_renderer.set_text("原生对话框未能打开，请稍后再试，或在前台终端输入消息。");
+                    bubble_timer = Some(std::time::Instant::now());
+                }
+            }
+        }
+        if !active_response.trim().is_empty() && !is_muttering && !is_startup_generation {
+            last_message.clone_from(&active_response);
+        }
+
         // Process incoming Stdin commands
         while let Ok(input_prompt) = stdin_rx.try_recv() {
             if input_prompt == "/exit" {
@@ -1294,7 +1315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 });
             } else {
-                active_response = "本地模型未加载！\n请在 config.toml 中配置 model_path。".to_string();
+                active_response = desktop::NO_MODEL_MESSAGE.to_string();
                 bubble_renderer.set_text(&active_response);
                 bubble_timer = Some(std::time::Instant::now());
                 bubble_show_duration = std::time::Duration::from_secs(6);
@@ -1344,7 +1365,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("[LLM Mutter Cleaned] response: {:?}", active_response);
                     bubble_renderer.set_text(&active_response);
                 } else {
+                    if active_response.trim().is_empty() {
+                        active_response = desktop::EMPTY_RESPONSE_MESSAGE.to_string();
+                    }
                     bubble_renderer.set_text(&active_response);
+                }
+                if was_muttering && !config.mutter_enabled {
+                    active_response.clear();
+                    bubble_renderer.set_text("");
                 }
 
                 bubble_timer = Some(std::time::Instant::now());
@@ -1376,8 +1404,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ("未知应用".to_string(), 12)
                     }
                 };
-                let mutter = get_offline_mutter(&app, hour, &config.pet_style);
-                bubble_renderer.set_text(&mutter);
+                active_response = if is_muttering {
+                    if config.mutter_enabled { get_offline_mutter(&app, hour, &config.pet_style) } else { String::new() }
+                } else {
+                    desktop::EMPTY_RESPONSE_MESSAGE.to_string()
+                };
+                bubble_renderer.set_text(&active_response);
                 is_muttering = false;
                 bubble_timer = Some(std::time::Instant::now());
                 bubble_show_duration = std::time::Duration::from_secs(8);
@@ -1438,6 +1470,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if bubble_timer.is_some() && bubble_renderer.has_text() {
+            if let (Some(monitor), Ok(pos)) = (window_for_run.current_monitor(), window_for_run.outer_position()) {
+                let origin = monitor.position();
+                let size = monitor.size();
+                let pet_size = window_for_run.inner_size();
+                let screen = placement::ScreenRect { x: origin.x, y: origin.y, width: size.width, height: size.height };
+                let pet = placement::ScreenRect { x: pos.x, y: pos.y, width: pet_size.width, height: pet_size.height };
+                let (width, height) = placement::bubble_limits(screen, pet, (8.0 * bubble_scale).round() as u32);
+                bubble_renderer.set_bubble_limits(width as f32, height as f32, 8);
+            }
             let (b_w_phys, b_h_phys) = bubble_renderer.measure_bubble_size();
             if b_w_phys > 0.0 && b_h_phys > 0.0 {
                 let b_w_log = b_w_phys as f64 / bubble_scale as f64;
@@ -1468,36 +1509,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Ok(pet_pos) = window_for_run.outer_position() {
                     let pet_size = window_for_run.inner_size();
 
-                    let bubble_y = if pet_pos.y < effective_bubble_size.height as i32 + 30 {
-                        bubble_renderer.bubble_on_bottom = true;
-                        pet_pos.y + pet_size.height as i32
-                    } else {
-                        bubble_renderer.bubble_on_bottom = false;
-                        pet_pos.y - effective_bubble_size.height as i32
-                    };
-
-                    let mut bubble_x = pet_pos.x
-                        + (pet_size.width as i32 - effective_bubble_size.width as i32) / 2;
-
                     if let Some(monitor) = window_for_run.current_monitor() {
-                        let monitor_pos = monitor.position();
-                        let monitor_size = monitor.size();
-                        let margin = (8.0 * bubble_scale as f64).round() as i32;
-                        let min_x = monitor_pos.x + margin;
-                        let max_x = monitor_pos.x + monitor_size.width as i32
-                            - effective_bubble_size.width as i32
-                            - margin;
-                        bubble_x = bubble_x.clamp(min_x, max_x.max(min_x));
+                        let origin = monitor.position();
+                        let size = monitor.size();
+                        let placed = placement::place_bubble(
+                            placement::ScreenRect { x: origin.x, y: origin.y, width: size.width, height: size.height },
+                            placement::ScreenRect { x: pet_pos.x, y: pet_pos.y, width: pet_size.width, height: pet_size.height },
+                            (effective_bubble_size.width, effective_bubble_size.height),
+                            (8.0 * bubble_scale).round() as u32,
+                        );
+                        bubble_renderer.bubble_on_bottom = placed.on_bottom;
+                        bubble_renderer.bubble_tail_x = Some(placed.tail_x);
+                        bubble_window_clone.set_outer_position(winit::dpi::PhysicalPosition::new(placed.x, placed.y));
                     }
-
-                    bubble_window_clone.set_outer_position(winit::dpi::PhysicalPosition::new(
-                        bubble_x, bubble_y,
-                    ));
                     if !bubble_window_clone.is_visible().unwrap_or(false) {
                         bubble_window_clone.set_visible(true);
                     }
                     bubble_window_clone.request_redraw();
                 }
+            } else {
+                bubble_window_clone.set_visible(false);
             }
         } else {
             if bubble_window_clone.is_visible().unwrap_or(false) {
@@ -1727,20 +1758,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 while let Ok(event) = MenuEvent::receiver().try_recv() {
                     let id = event.id.0.as_str();
                     match id {
+                        "action_chat" => {
+                            dialogs.input(desktop::InputKind::Chat, "和桌宠说句话", "想聊些什么？回复会显示在桌宠旁边。", "");
+                        }
+                        "action_last_message" => {
+                            dialogs.show("完整消息", if last_message.is_empty() { "还没有消息。可以先和桌宠说句话。" } else { &last_message });
+                        }
+                        "action_help" => {
+                            let mode = if llama_engine.is_some() { "已配置本地模型，休息时会自动释放资源。" } else { "目前为离线陪伴模式，可触摸、拖动和切换外观。" };
+                            dialogs.show("Nimbus 使用帮助", &format!("{}\n\n• 聊天：托盘 → 和桌宠说句话\n• 重读：托盘 → 查看完整消息\n• 移动：按住桌宠身体拖动\n• 安静陪伴：关闭“主动说话（含梦话）”\n\n本地对话需要兼容的 GGUF 模型。在 ~/.nimbus_config.toml 中设置 model_path 为模型文件的绝对路径，保存后重启。无需模型也能离线陪伴。\n\n应用名称、活跃时段和成长记忆仅保存在 ~/.nimbus_memory.json；可在“主人记忆管理”中查看或清空。天气是手动设置，不代表实时天气。", mode));
+                        }
                         "mutter_enabled" => {
                             config.mutter_enabled = !config.mutter_enabled;
                             config.save();
                         }
                         "action_rename" => {
-                            if let Some(new_name) = prompt_for_pet_name(&config.pet_name) {
-                                config.pet_name = new_name.clone();
-                                config.save();
-                                bubble_renderer.set_text("名字我记住了，会慢慢适应这个称呼。");
-                                bubble_timer = Some(std::time::Instant::now());
-                                bubble_show_duration = std::time::Duration::from_secs(5);
-                                window_for_run.request_redraw();
-                                println!("\n>> 桌宠重命名为：{}", new_name);
-                            }
+                            dialogs.input(desktop::InputKind::Rename, "设置桌宠名字", "请输入新名字（最多 40 个字）：", &config.pet_name);
                         }
                         "memory_show_info" => {
                             let path = PetMemory::get_path();
@@ -1763,19 +1796,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             top_hours.iter().map(|h| format!("{}点", h)).collect::<Vec<_>>().join("/")
                                         )
                                     };
-                                    format!("记忆文件：~/.nimbus_memory.json\\n文件大小：{}\\n互动次数：{}次\\n\\n【日常习惯习惯记忆】\\n{}",
+                                    format!("记忆文件：~/.nimbus_memory.json\\n文件大小：{}\\n互动次数：{}次\\n\\n【日常习惯记忆】\\n{}",
                                         size_str, mem.total_interactions, active_desc)
                                 } else {
                                     "无法读取记忆。".to_string()
                                 }
                             };
-                            show_system_dialog("主人记忆日记详情", &info_msg);
+                            dialogs.show("主人记忆日记详情", &info_msg.replace("\\n", "\n"));
                         }
                         "memory_open_dir" => {
                             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
                             let _ = std::process::Command::new("open").arg(&home).status();
                         }
                         "memory_clear" => {
+                            if let Some(ref engine) = llama_engine {
+                                let _ = engine.clear_history();
+                            }
                             if let Ok(mut mem) = memory.lock() {
                                 mem.clear();
                                 bubble_renderer.set_text("记忆已清空，我会重新认识你。");
@@ -2205,6 +2241,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires a configured local GGUF model"]
     async fn test_model_mutter_generation_robustness() {
         let model_path = std::path::PathBuf::from("/Users/jinliang/.lmstudio/models/openbmb/MiniCPM5-1B-GGUF/MiniCPM5-1B-Q4_K_M.gguf");
         if !model_path.exists() {

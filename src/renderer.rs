@@ -22,10 +22,7 @@ pub struct StyleConfig {
     pub max_y_drop_surprised: f32,
     pub max_y_drop_tickled: f32,
     pub max_y_drop_default: f32,
-    pub body_color_stops: Vec<(f32, Color)>,
-    pub shadow_color: Color,
     pub outer_rim_color: Color,
-    pub inner_rim_color: Color,
 }
 
 pub struct PetRenderer {
@@ -44,6 +41,10 @@ pub struct PetRenderer {
 
     // Dynamic text buffer for bubbles
     text_buffer: Buffer,
+    full_text: String,
+    bubble_max_size: Option<(f32, f32)>,
+    bubble_max_lines: usize,
+    bubble_layout_dirty: bool,
 
     // Mouse hover state
     pub pointer_inside: bool,
@@ -88,6 +89,7 @@ pub struct PetRenderer {
     pub pet_y_override: Option<f32>,
     pub scale_factor: f32,
     pub bubble_on_bottom: bool,
+    pub bubble_tail_x: Option<f32>,
 }
 
 impl PetRenderer {
@@ -98,7 +100,7 @@ impl PetRenderer {
         let swash_cache = SwashCache::new();
 
         let mut text_buffer = Buffer::new(&mut font_system, cosmic_text::Metrics::new(24.0, 30.0));
-        text_buffer.set_size(&mut font_system, Some((width - 45) as f32), None);
+        text_buffer.set_size(&mut font_system, Some(width.saturating_sub(45).max(1) as f32), None);
 
         Self {
             pixmap,
@@ -112,6 +114,10 @@ impl PetRenderer {
             blink_start_time: 0.0,
             next_blink_time: 2.0,
             text_buffer,
+            full_text: String::new(),
+            bubble_max_size: None,
+            bubble_max_lines: 8,
+            bubble_layout_dirty: true,
             pointer_inside: false,
             pointer_x: 24.0,
             pointer_y: 24.0,
@@ -146,6 +152,7 @@ impl PetRenderer {
             pet_y_override: None,
             scale_factor: 1.0,
             bubble_on_bottom: false,
+            bubble_tail_x: None,
         }
     }
 
@@ -155,106 +162,79 @@ impl PetRenderer {
     }
 
     pub fn get_style_config(&self) -> StyleConfig {
+        let material = crate::art::palette(&self.active_style);
         match self.active_style.as_str() {
             "mochi" => StyleConfig {
                 name: "mochi",
-                eye_base_w: 3.9,
-                eye_base_h: 4.4,
-                left_eye_x: 9.2,
-                right_eye_x: 14.8,
-                eye_y: 12.5,
-                blush_left_x: 7.5,
-                blush_right_x: 14.0,
-                blush_y: 14.6,
+                eye_base_w: 3.35,
+                eye_base_h: 4.25,
+                left_eye_x: 9.3,
+                right_eye_x: 15.0,
+                eye_y: 12.3,
+                blush_left_x: 6.6,
+                blush_right_x: 16.2,
+                blush_y: 14.3,
                 blush_w: 2.2,
-                blush_h: 1.2,
-                mouth_y: 15.2,
+                blush_h: 1.0,
+                mouth_y: 16.0,
                 max_y_drop_surprised: 2.0,
                 max_y_drop_tickled: 1.6,
                 max_y_drop_default: 1.0,
-                body_color_stops: vec![
-                    (0.0, Color::from_rgba8(255, 255, 255, 255)),
-                    (0.45, Color::from_rgba8(218, 245, 212, 255)),
-                    (1.0, Color::from_rgba8(172, 224, 185, 255)),
-                ],
-                shadow_color: Color::from_rgba8(50, 180, 100, 20),
-                outer_rim_color: Color::from_rgba8(110, 180, 130, 40),
-                inner_rim_color: Color::from_rgba8(255, 255, 255, 80),
+                outer_rim_color: material.edge,
             },
             "starlit" => StyleConfig {
                 name: "starlit",
-                eye_base_w: 3.2,
-                eye_base_h: 3.2,
-                left_eye_x: 9.6,
-                right_eye_x: 14.4,
+                eye_base_w: 3.8,
+                eye_base_h: 4.6,
+                left_eye_x: 19.2,
+                right_eye_x: 28.8,
                 eye_y: 11.5,
-                blush_left_x: 7.2,
-                blush_right_x: 14.3,
-                blush_y: 13.8,
-                blush_w: 2.4,
-                blush_h: 1.2,
-                mouth_y: 14.2,
+                blush_left_x: 14.8,
+                blush_right_x: 30.7,
+                blush_y: 13.5,
+                blush_w: 2.5,
+                blush_h: 1.1,
+                mouth_y: 14.7,
                 max_y_drop_surprised: 2.0,
                 max_y_drop_tickled: 1.6,
                 max_y_drop_default: 1.0,
-                body_color_stops: vec![
-                    (0.0, Color::from_rgba8(255, 235, 245, 255)),
-                    (0.5, Color::from_rgba8(220, 195, 250, 255)),
-                    (1.0, Color::from_rgba8(165, 175, 245, 255)),
-                ],
-                shadow_color: Color::from_rgba8(120, 50, 255, 20),
-                outer_rim_color: Color::from_rgba8(150, 120, 255, 35),
-                inner_rim_color: Color::from_rgba8(255, 255, 255, 75),
+                outer_rim_color: material.edge,
             },
             "crab" => StyleConfig {
                 name: "crab",
                 eye_base_w: 2.5,
                 eye_base_h: 2.5,
-                left_eye_x: 21.0,
-                right_eye_x: 27.0,
-                eye_y: 11.2,
-                blush_left_x: 17.9,
-                blush_right_x: 27.9,
-                blush_y: 13.8,
-                blush_w: 2.2,
+                left_eye_x: 20.0,
+                right_eye_x: 28.0,
+                eye_y: 10.8,
+                blush_left_x: 15.1,
+                blush_right_x: 30.4,
+                blush_y: 14.5,
+                blush_w: 2.5,
                 blush_h: 1.1,
-                mouth_y: 14.5,
+                mouth_y: 15.3,
                 max_y_drop_surprised: 2.0,
                 max_y_drop_tickled: 1.6,
                 max_y_drop_default: 1.0,
-                body_color_stops: vec![
-                    (0.0, Color::from_rgba8(255, 130, 95, 255)),
-                    (0.5, Color::from_rgba8(255, 80, 70, 255)),
-                    (1.0, Color::from_rgba8(220, 45, 45, 255)),
-                ],
-                shadow_color: Color::from_rgba8(180, 30, 30, 20),
-                outer_rim_color: Color::from_rgba8(200, 40, 40, 45),
-                inner_rim_color: Color::from_rgba8(255, 255, 255, 80),
+                outer_rim_color: material.edge,
             },
             _ => StyleConfig {
                 name: "nimbus",
-                eye_base_w: 2.95,
-                eye_base_h: 5.35,
-                left_eye_x: 8.85,
-                right_eye_x: 15.15,
-                eye_y: 12.0,
-                blush_left_x: 7.0,
-                blush_right_x: 14.5,
-                blush_y: 14.3,
-                blush_w: 2.5,
-                blush_h: 1.2,
-                mouth_y: 15.0,
+                eye_base_w: 3.65,
+                eye_base_h: 4.8,
+                left_eye_x: 18.6,
+                right_eye_x: 28.5,
+                eye_y: 14.0,
+                blush_left_x: 14.3,
+                blush_right_x: 30.4,
+                blush_y: 16.0,
+                blush_w: 2.7,
+                blush_h: 1.1,
+                mouth_y: 17.5,
                 max_y_drop_surprised: 2.2,
                 max_y_drop_tickled: 1.8,
                 max_y_drop_default: 1.2,
-                body_color_stops: vec![
-                    (0.0, Color::from_rgba8(255, 255, 255, 255)),
-                    (0.4, Color::from_rgba8(248, 252, 255, 255)),
-                    (1.0, Color::from_rgba8(218, 225, 240, 255)),
-                ],
-                shadow_color: Color::from_rgba8(57, 65, 255, 22),
-                outer_rim_color: Color::from_rgba8(130, 160, 255, 30),
-                inner_rim_color: Color::from_rgba8(255, 255, 255, 65),
+                outer_rim_color: material.edge,
             },
         }
     }
@@ -264,6 +244,7 @@ impl PetRenderer {
     }
 
     pub fn set_font_size(&mut self, font_size: f32) {
+        self.bubble_layout_dirty = true;
         let physical_font_size = font_size * self.scale_factor;
         let line_height = physical_font_size * 1.25;
         let metrics = cosmic_text::Metrics::new(physical_font_size, line_height);
@@ -282,7 +263,7 @@ impl PetRenderer {
             let wrap_w = width as f32 - self.bubble_horizontal_inset() * 2.0;
             self.text_buffer.set_size(
                 &mut self.font_system,
-                Some(wrap_w.max(100.0 * self.scale_factor)),
+                Some(wrap_w.max(1.0)),
                 None,
             );
             self.text_buffer
@@ -298,18 +279,29 @@ impl PetRenderer {
     }
 
     pub fn measure_bubble_size(&mut self) -> (f32, f32) {
-        let max_window_w = BUBBLE_MAX_LOGICAL_W * self.scale_factor;
+        let (max_window_w, max_window_h) = self.bubble_max_size
+            .unwrap_or((BUBBLE_MAX_LOGICAL_W * self.scale_factor, 360.0 * self.scale_factor));
+        let max_window_w = max_window_w.min(BUBBLE_MAX_LOGICAL_W * self.scale_factor).max(1.0);
         let max_text_w =
-            (max_window_w - self.bubble_horizontal_inset() * 2.0).max(80.0 * self.scale_factor);
+            (max_window_w - self.bubble_horizontal_inset() * 2.0).max(1.0);
         self.text_buffer
             .set_size(&mut self.font_system, Some(max_text_w), None);
-        self.text_buffer
-            .shape_until_scroll(&mut self.font_system, false);
 
         let pad_x = 18.0 * self.scale_factor;
         let pad_top = 12.0 * self.scale_factor;
         let pad_bottom = 8.0 * self.scale_factor;
+        let overhead = pad_top + pad_bottom + self.bubble_tail_height()
+            + self.bubble_edge_safe_pad() * 2.0 + self.bubble_shadow_pad();
+        if self.bubble_layout_dirty {
+            self.fit_bubble_text((max_window_h - overhead).max(0.0));
+            self.bubble_layout_dirty = false;
+        } else {
+            self.text_buffer.shape_until_scroll(&mut self.font_system, false);
+        }
 
+        if !self.bubble_text_fits((max_window_h - overhead).max(0.0)) {
+            return (0.0, 0.0);
+        }
         let mut max_width = 0.0f32;
         let mut height = 0.0f32;
         let mut max_line_height = 0.0f32;
@@ -330,13 +322,73 @@ impl PetRenderer {
         let safe_pad = self.bubble_edge_safe_pad();
         let shadow_pad = self.bubble_shadow_pad();
         let bubble_w = (max_width + pad_x * 2.0 + safe_pad * 2.0)
-            .clamp(BUBBLE_MIN_LOGICAL_W * self.scale_factor, max_window_w)
-            .ceil();
+            .clamp((BUBBLE_MIN_LOGICAL_W * self.scale_factor).min(max_window_w), max_window_w)
+            .ceil().min(max_window_w);
         let visual_text_h = height.max(runs_to_draw as f32 * max_line_height);
         let bubble_h =
-            (visual_text_h + pad_top + pad_bottom + tail_h + safe_pad * 2.0 + shadow_pad).ceil();
+            (visual_text_h + pad_top + pad_bottom + tail_h + safe_pad * 2.0 + shadow_pad)
+                .ceil().min(max_window_h);
 
         (bubble_w, bubble_h)
+    }
+
+    /// Limits are physical pixels, matching the active monitor and text scale.
+    pub fn set_bubble_limits(&mut self, max_width: f32, max_height: f32, max_lines: usize) {
+        let max_size = Some((max_width.max(1.0), max_height.max(1.0)));
+        let max_lines = max_lines.max(1);
+        if self.bubble_max_size != max_size || self.bubble_max_lines != max_lines {
+            self.bubble_layout_dirty = true;
+        }
+        self.bubble_max_size = max_size;
+        self.bubble_max_lines = max_lines;
+    }
+
+    fn bubble_text_fits(&self, max_height: f32) -> bool {
+        let mut lines = 0;
+        for run in self.text_buffer.layout_runs() {
+            lines += 1;
+            if lines > self.bubble_max_lines || run.line_top + run.line_height > max_height
+                || run.line_w > self.text_buffer.size().0.unwrap_or(f32::INFINITY) + 0.01 {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn fit_bubble_text(&mut self, max_height: f32) {
+        let full_text = self.full_text.clone();
+        self.set_display_text(&full_text);
+        if self.bubble_text_fits(max_height) {
+            return;
+        }
+
+        // Keep the original message intact so a larger screen or smaller font restores it.
+        let mut suffix = "\n…（托盘查看全文）";
+        self.set_display_text(suffix);
+        if !self.bubble_text_fits(max_height) {
+            suffix = "…";
+            self.set_display_text(suffix);
+            if !self.bubble_text_fits(max_height) {
+                return;
+            }
+        }
+        let mut boundaries: Vec<usize> = full_text.char_indices().map(|(index, _)| index).collect();
+        boundaries.push(full_text.len());
+        let mut low = 0;
+        let mut high = boundaries.len().saturating_sub(1);
+        while low < high {
+            let mid = low + (high - low + 1) / 2;
+            let candidate = format!("{}{}", full_text[..boundaries[mid]].trim_end(), suffix);
+            self.set_display_text(&candidate);
+            if self.bubble_text_fits(max_height) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        let prefix = full_text[..boundaries[low]].trim_end();
+        let suffix = if prefix.is_empty() { suffix.trim_start() } else { suffix };
+        self.set_display_text(&format!("{prefix}{suffix}"));
     }
 
     fn bubble_horizontal_inset(&self) -> f32 {
@@ -387,6 +439,12 @@ impl PetRenderer {
     }
 
     pub fn set_text(&mut self, text: &str) {
+        self.bubble_layout_dirty = true;
+        self.full_text = text.to_string();
+        self.set_display_text(text);
+    }
+
+    fn set_display_text(&mut self, text: &str) {
         let mut attrs = cosmic_text::Attrs::new();
         // Set dark slate blue and Medium weight for standard pet chat style
         attrs = attrs
@@ -559,7 +617,13 @@ impl PetRenderer {
         pb.close();
 
         let path = pb.finish().unwrap();
-        let cx = max_w_limit / 2.0;
+        let tail_margin = radius + 5.5 * self.scale_factor;
+        let cx = if bubble_w >= tail_margin * 2.0 {
+            self.bubble_tail_x.unwrap_or(max_w_limit / 2.0)
+                .clamp(x + tail_margin, x + bubble_w - tail_margin)
+        } else {
+            x + bubble_w / 2.0
+        };
         let mut tail_pb = PathBuilder::new();
         if self.bubble_on_bottom {
             // Tail pointing upwards (at top of bubble)
@@ -1176,61 +1240,51 @@ impl PetRenderer {
 
         let style = self.get_style_config();
 
-        // Custom shape paths based on style
+        // Each silhouette is designed as a small, stuffed storybook character.
         let mut pb = PathBuilder::new();
         match style.name {
             "mochi" => {
-                // 抹茶小猫主体 (融入挺立左偏猫耳 + 侧趴后背与脸部下方前爪起伏)
-                pb.move_to(8.0, 21.5);
-                // 左脸边缘
-                pb.quad_to(5.8, 21.5, 5.8, 19.0);
-                pb.cubic_to(5.5, 14.5, 6.5, 10.0, 7.5, 8.5);
-
-                // 左耳尖 (8.5, 2.0)
-                pb.cubic_to(7.2, 5.5, 7.8, 3.5, 8.5, 2.0);
-                // 左耳内侧
-                pb.cubic_to(9.2, 3.5, 10.5, 5.5, 11.5, 8.0);
-
-                // 头顶 (两耳间)
-                pb.quad_to(13.0, 8.2, 14.5, 8.0);
-
-                // 右耳尖 (15.5, 2.0)
-                pb.cubic_to(14.8, 5.5, 15.2, 3.5, 15.5, 2.0);
-                // 右耳外侧 (到后背连接处)
-                pb.cubic_to(16.2, 3.5, 17.2, 5.5, 17.8, 8.5);
-
-                // 圆润后背与大臀部 (延伸到 42.0 臀部)
-                pb.cubic_to(22.0, 7.5, 38.0, 9.0, 42.0, 16.0);
-                pb.quad_to(43.0, 18.0, 42.0, 20.0);
-                pb.quad_to(41.5, 21.5, 39.5, 21.5);
-
-                // 底部腹部
-                pb.line_to(8.0, 21.5);
+                // A round cheek and low, bean-shaped body; ears have padded tips.
+                pb.move_to(8.0, 21.2);
+                pb.cubic_to(4.9, 20.4, 5.1, 12.3, 7.8, 9.2);
+                pb.cubic_to(6.7, 7.4, 6.7, 3.1, 8.5, 2.5);
+                pb.cubic_to(10.4, 3.6, 10.9, 6.3, 11.8, 8.0);
+                pb.quad_to(13.3, 7.9, 14.4, 8.0);
+                pb.cubic_to(14.2, 5.2, 14.4, 2.4, 16.0, 2.8);
+                pb.cubic_to(18.0, 4.1, 18.8, 6.9, 18.0, 9.0);
+                pb.cubic_to(20.3, 10.7, 20.1, 12.6, 20.8, 12.9);
+                pb.cubic_to(24.8, 8.9, 35.7, 10.5, 38.3, 16.2);
+                pb.cubic_to(40.0, 22.1, 32.0, 23.0, 28.0, 21.3);
+                pb.cubic_to(23.0, 22.0, 19.8, 21.4, 17.4, 21.1);
+                pb.cubic_to(15.3, 22.3, 9.0, 23.0, 8.0, 21.2);
                 pb.close();
             }
             "starlit" => {
-                // 卡通章鱼头：顶部圆润饱满，下部在眼部下方略微收脖子，底口平滑
-                pb.move_to(11.0, 17.5);
-                pb.cubic_to(5.0, 16.0, 5.0, 4.0, 24.0, 4.0);
-                pb.cubic_to(43.0, 4.0, 44.0, 16.0, 37.0, 17.5);
-                pb.line_to(11.0, 17.5);
+                // Pear-shaped stuffed mantle, rounded at the cheeks and tentacle seam.
+                pb.move_to(10.0, 17.6);
+                pb.cubic_to(5.3, 14.4, 6.7, 7.2, 14.3, 4.9);
+                pb.cubic_to(20.0, 2.6, 29.5, 2.9, 34.2, 6.2);
+                pb.cubic_to(41.0, 9.0, 44.0, 14.8, 38.8, 18.0);
+                pb.cubic_to(31.4, 20.0, 16.5, 19.7, 10.0, 17.6);
                 pb.close();
             }
             "crab" => {
-                // 螃蟹主体：左右略扁的红润大椭圆
-                pb.move_to(9.0, 16.0);
-                pb.cubic_to(9.0, 9.5, 39.0, 9.5, 39.0, 16.0);
-                pb.cubic_to(39.0, 22.5, 9.0, 22.5, 9.0, 16.0);
+                // A padded scallop shell instead of a flat ellipse.
+                pb.move_to(9.4, 16.0);
+                pb.cubic_to(9.8, 12.5, 15.3, 10.7, 19.3, 11.5);
+                pb.quad_to(24.0, 9.5, 28.7, 11.5);
+                pb.cubic_to(33.2, 10.7, 38.3, 12.7, 38.6, 16.1);
+                pb.cubic_to(37.8, 22.2, 11.0, 22.5, 9.4, 16.0);
                 pb.close();
             }
             _ => {
-                // 经典的云朵
-                pb.move_to(8.0, 24.0);
-                pb.cubic_to(4.0, 20.0, 4.0, 12.0, 10.0, 10.0);
-                pb.cubic_to(10.0, 4.0, 18.0, 4.0, 22.0, 8.0);
-                pb.cubic_to(26.0, 2.0, 36.0, 4.0, 38.0, 12.0);
-                pb.cubic_to(44.0, 14.0, 44.0, 22.0, 38.0, 24.0);
-                pb.line_to(8.0, 24.0);
+                // Three unequal wool-cloud lobes with a pillowy, curved underside.
+                pb.move_to(9.0, 22.3);
+                pb.cubic_to(3.0, 22.5, 3.5, 14.0, 8.6, 13.2);
+                pb.cubic_to(7.4, 6.5, 14.4, 4.0, 18.8, 8.0);
+                pb.cubic_to(22.3, 2.4, 33.1, 3.4, 35.3, 11.3);
+                pb.cubic_to(42.4, 9.5, 45.1, 20.5, 38.0, 22.8);
+                pb.cubic_to(31.0, 24.6, 17.0, 24.9, 9.0, 22.3);
                 pb.close();
             }
         }
@@ -1263,43 +1317,37 @@ impl PetRenderer {
             let tail_rot = (anim_t * tail_speed).sin() * tail_amp * anim_amplitude;
 
             let mut tail_pb = PathBuilder::new();
-            tail_pb.move_to(37.0, 19.5);
+            tail_pb.move_to(36.0, 19.5);
             tail_pb.cubic_to(
-                40.0 + tail_rot * 6.0,
+                39.0 + tail_rot * 6.0,
                 20.5,
-                45.0 + tail_rot * 8.0,
+                44.6 + tail_rot * 8.0,
                 16.0 - tail_rot * 5.0,
-                43.5 + tail_rot * 4.0,
+                43.1 + tail_rot * 4.0,
                 9.0 - tail_rot * 8.0,
             );
             tail_pb.cubic_to(
-                42.5 + tail_rot * 2.0,
+                42.1 + tail_rot * 2.0,
                 5.5 - tail_rot * 9.0,
-                39.5 + tail_rot * 2.0,
+                38.5 + tail_rot * 2.0,
                 7.5 - tail_rot * 8.0,
-                40.0 + tail_rot * 3.0,
+                39.0 + tail_rot * 3.0,
                 11.5 - tail_rot * 6.0,
             );
             tail_pb.cubic_to(
-                40.5 + tail_rot * 4.0,
+                39.5 + tail_rot * 4.0,
                 15.0,
-                38.5 + tail_rot * 3.0,
+                37.5 + tail_rot * 3.0,
                 20.0,
-                37.0,
+                36.0,
                 21.0,
             );
             tail_pb.close();
             if let Some(tail_path) = tail_pb.finish() {
                 let mut tail_paint = Paint::default();
-                tail_paint.set_color(Color::from_rgba8(200, 235, 210, 255));
+                tail_paint.set_color(crate::art::palette("mochi").body);
                 tail_paint.anti_alias = true;
-                self.pixmap.fill_path(
-                    &tail_path,
-                    &tail_paint,
-                    FillRule::Winding,
-                    body_transform,
-                    None,
-                );
+                crate::art::material(&mut self.pixmap, &tail_path, body_transform, style.name);
 
                 let mut tail_stroke = Paint::default();
                 tail_stroke.set_color(style.outer_rim_color);
@@ -1317,74 +1365,8 @@ impl PetRenderer {
             }
         }
 
-        // 1. Draw Rim & Body
-        let mut rim_paint = Paint::default();
-        rim_paint.set_color(style.outer_rim_color);
-        rim_paint.anti_alias = true;
-        self.pixmap.stroke_path(
-            &body_path,
-            &rim_paint,
-            &Stroke {
-                width: 0.9,
-                ..Default::default()
-            },
-            body_transform,
-            None,
-        );
-
-        let mut rim_tight_paint = Paint::default();
-        rim_tight_paint.set_color(style.inner_rim_color);
-        rim_tight_paint.anti_alias = true;
-        self.pixmap.stroke_path(
-            &body_path,
-            &rim_tight_paint,
-            &Stroke {
-                width: 0.45,
-                ..Default::default()
-            },
-            body_transform,
-            None,
-        );
-
-        let gradient_stops: Vec<tiny_skia::GradientStop> = style
-            .body_color_stops
-            .iter()
-            .map(|(pos, color)| tiny_skia::GradientStop::new(*pos, *color))
-            .collect();
-
-        let body_grad = LinearGradient::new(
-            tiny_skia::Point::from_xy(12.0, 2.0),
-            tiny_skia::Point::from_xy(12.0, 22.0),
-            gradient_stops,
-            tiny_skia::SpreadMode::Pad,
-            Transform::identity(),
-        )
-        .unwrap();
-
-        let body_paint = Paint {
-            shader: body_grad,
-            anti_alias: true,
-            ..Default::default()
-        };
-
-        let mut shadow_paint = Paint::default();
-        shadow_paint.set_color(style.shadow_color);
-        shadow_paint.anti_alias = true;
-        self.pixmap.fill_path(
-            &body_path,
-            &shadow_paint,
-            FillRule::Winding,
-            body_transform.post_translate(0.0, 1.5),
-            None,
-        );
-
-        self.pixmap.fill_path(
-            &body_path,
-            &body_paint,
-            FillRule::Winding,
-            body_transform,
-            None,
-        );
+        // A shared matte material keeps all five characters in one visual family.
+        crate::art::material(&mut self.pixmap, &body_path, body_transform, style.name);
 
         // --- Render style-specific accessories / decor ---
         if style.name == "mochi" {
@@ -1475,14 +1457,14 @@ impl PetRenderer {
             }
 
             let mut paw_fill_paint = Paint::default();
-            paw_fill_paint.set_color(Color::from_rgba8(195, 235, 210, 255)); // 抹茶绿底部浅色
+            paw_fill_paint.set_color(crate::art::palette("mochi").body); // 抹茶绿底部浅色
             paw_fill_paint.anti_alias = true;
 
             let mut paw_stroke_paint = Paint::default();
             paw_stroke_paint.set_color(style.outer_rim_color);
             paw_stroke_paint.anti_alias = true;
             let paw_stroke = Stroke {
-                width: 0.82,
+                width: 0.38,
                 ..Default::default()
             };
 
@@ -1497,13 +1479,7 @@ impl PetRenderer {
             left_stroke_pb.cubic_to(8.2, 24.2, 12.2, 24.2, 12.2, 21.0);
 
             if let (Some(fp), Some(sp)) = (left_fill_pb.finish(), left_stroke_pb.finish()) {
-                self.pixmap.fill_path(
-                    &fp,
-                    &paw_fill_paint,
-                    FillRule::Winding,
-                    paw_l_transform,
-                    None,
-                );
+                crate::art::material(&mut self.pixmap, &fp, paw_l_transform, "mochi");
                 self.pixmap
                     .stroke_path(&sp, &paw_stroke_paint, &paw_stroke, paw_l_transform, None);
             }
@@ -1519,13 +1495,7 @@ impl PetRenderer {
             right_stroke_pb.cubic_to(13.5, 24.2, 17.5, 24.2, 17.5, 21.0);
 
             if let (Some(fp), Some(sp)) = (right_fill_pb.finish(), right_stroke_pb.finish()) {
-                self.pixmap.fill_path(
-                    &fp,
-                    &paw_fill_paint,
-                    FillRule::Winding,
-                    paw_r_transform,
-                    None,
-                );
+                crate::art::material(&mut self.pixmap, &fp, paw_r_transform, "mochi");
                 self.pixmap
                     .stroke_path(&sp, &paw_stroke_paint, &paw_stroke, paw_r_transform, None);
             }
@@ -1539,7 +1509,7 @@ impl PetRenderer {
             inner_l_pb.close();
             if let Some(ipath) = inner_l_pb.finish() {
                 let mut inner_paint = Paint::default();
-                inner_paint.set_color(Color::from_rgba8(255, 190, 200, 255));
+                inner_paint.set_color(Color::from_rgba8(219, 167, 147, 230));
                 inner_paint.anti_alias = true;
                 self.pixmap.fill_path(
                     &ipath,
@@ -1572,7 +1542,7 @@ impl PetRenderer {
             inner_r_pb.close();
             if let Some(ipath) = inner_r_pb.finish() {
                 let mut inner_paint = Paint::default();
-                inner_paint.set_color(Color::from_rgba8(255, 190, 200, 255));
+                inner_paint.set_color(Color::from_rgba8(219, 167, 147, 230));
                 inner_paint.anti_alias = true;
                 self.pixmap.fill_path(
                     &ipath,
@@ -1664,7 +1634,7 @@ impl PetRenderer {
             collar_pb.quad_to(12.0, 20.6, 17.5, 19.2);
             if let Some(cp) = collar_pb.finish() {
                 let mut collar_paint = Paint::default();
-                collar_paint.set_color(Color::from_rgba8(255, 60, 60, 255));
+                collar_paint.set_color(Color::from_rgba8(162, 107, 95, 240));
                 collar_paint.anti_alias = true;
                 self.pixmap.stroke_path(
                     &cp,
@@ -1681,16 +1651,16 @@ impl PetRenderer {
             // Draw Golden Bell (金色小铃铛，精准对齐 x=12.0 胸口)
             let bell_cx = 12.0;
             let bell_cy = 20.0;
-            let bell_r = 1.3;
+            let bell_r = 0.95;
             if let Some(bell_rect) = Rect::from_xywh(
                 bell_cx - bell_r,
                 bell_cy - bell_r,
                 bell_r * 2.0,
                 bell_r * 2.0,
             ) {
-                let bell_pb = PathBuilder::from_rect(bell_rect);
+                let bell_pb = PathBuilder::from_oval(bell_rect).unwrap();
                 let mut bell_paint = Paint::default();
-                bell_paint.set_color(Color::from_rgba8(255, 215, 0, 255));
+                bell_paint.set_color(Color::from_rgba8(223, 181, 111, 255));
                 bell_paint.anti_alias = true;
                 self.pixmap.fill_path(
                     &bell_pb,
@@ -1733,7 +1703,7 @@ impl PetRenderer {
 
                 // 铃铛底孔
                 if let Some(hole_rect) = Rect::from_xywh(bell_cx - 0.35, bell_cy + 0.5, 0.7, 0.7) {
-                    let hole_pb = PathBuilder::from_rect(hole_rect);
+                    let hole_pb = PathBuilder::from_oval(hole_rect).unwrap();
                     self.pixmap.fill_path(
                         &hole_pb,
                         &stroke_paint,
@@ -1758,42 +1728,24 @@ impl PetRenderer {
                 let wave_y = ((tentacle_t + 1.15).cos() * 0.8) * anim_amplitude;
 
                 let mut leg_pb = PathBuilder::new();
-                leg_pb.move_to(x_anchor, 16.5);
-
-                // 根部 ctrl_x1/y1 仅微弱颤动 (定锚)
-                let ctrl_x1 = x_anchor + wave_x * 0.15 - if i < 3 { 2.2 } else { -2.2 };
+                let inward = if i < 3 { 1.0 } else { -1.0 };
+                let ctrl_x1 = x_anchor - inward * 1.8 + wave_x * 0.15;
                 let ctrl_y1 = 20.0 + wave_y * 0.10;
-                // 中部 ctrl_x2/y2 幅度适中
-                let ctrl_x2 = x_anchor + wave_x * 0.75 - if i < 3 { 3.2 } else { -3.2 };
-                let ctrl_y2 = 24.0 + wave_y * 0.60;
-                // 梢部 end_x/y 幅度最大
-                let end_x = x_anchor + wave_x * 1.7 - if i < 3 { 2.0 } else { -2.0 };
-                let end_y = 25.5 + wave_y * 1.1;
-
-                leg_pb.cubic_to(ctrl_x1, ctrl_y1, ctrl_x2, ctrl_y2, end_x, end_y);
-
-                let leg_w = 2.4f32; // 触手宽度/厚度
-                leg_pb.cubic_to(
-                    ctrl_x2 + if i < 3 { leg_w } else { -leg_w },
-                    ctrl_y2,
-                    ctrl_x1 + if i < 3 { leg_w * 0.8 } else { -leg_w * 0.8 },
-                    ctrl_y1,
-                    x_anchor + if i < 3 { leg_w } else { -leg_w },
-                    16.5,
-                );
+                let ctrl_x2 = x_anchor - inward * 2.4 + wave_x * 0.50;
+                let ctrl_y2 = 22.4 + wave_y * 0.35;
+                let end_x = x_anchor - inward * 1.9 + wave_x * 0.85;
+                let end_y = 24.1 + wave_y * 0.45;
+                leg_pb.move_to(x_anchor, 16.5);
+                leg_pb.cubic_to(ctrl_x1, ctrl_y1, ctrl_x2, ctrl_y2, end_x, end_y - 0.7);
+                leg_pb.cubic_to(end_x - inward * 0.25, end_y + 1.0, end_x + inward * 2.6, end_y + 1.1, end_x + inward * 2.8, end_y - 0.5);
+                leg_pb.cubic_to(ctrl_x2 + inward * 3.0, ctrl_y2 - 0.2, ctrl_x1 + inward * 2.8, ctrl_y1, x_anchor + inward * 3.0, 16.5);
                 leg_pb.close();
 
                 if let Some(leg_path) = leg_pb.finish() {
                     let mut leg_paint = Paint::default();
-                    leg_paint.set_color(Color::from_rgba8(190, 185, 245, 255));
+                    leg_paint.set_color(crate::art::palette("starlit").body);
                     leg_paint.anti_alias = true;
-                    self.pixmap.fill_path(
-                        &leg_path,
-                        &leg_paint,
-                        FillRule::Winding,
-                        body_transform,
-                        None,
-                    );
+                    crate::art::material(&mut self.pixmap, &leg_path, body_transform, style.name);
 
                     let mut leg_stroke = Paint::default();
                     leg_stroke.set_color(style.outer_rim_color);
@@ -1871,199 +1823,8 @@ impl PetRenderer {
                 }
             }
 
-            // Shining Star
-            let star_alpha = if self.pet_state == "sleeping" {
-                (70.0 + (t * 2.0).sin().abs() * 50.0) as u8
-            } else {
-                245
-            };
+            crate::art::material(&mut self.pixmap, &body_path, body_transform, style.name);
 
-            let star_size = 1.6 + (t * 3.0).sin().abs() * 0.3;
-            let star_x = 24.0;
-            let star_y = 3.5 - breath_wave * 0.3;
-
-            let mut star_pb = PathBuilder::new();
-            star_pb.move_to(star_x, star_y - star_size);
-            star_pb.quad_to(star_x, star_y, star_x + star_size, star_y);
-            star_pb.quad_to(star_x, star_y, star_x, star_y + star_size);
-            star_pb.quad_to(star_x, star_y, star_x - star_size, star_y);
-            star_pb.quad_to(star_x, star_y, star_x, star_y - star_size);
-            star_pb.close();
-
-            if let Some(star_path) = star_pb.finish() {
-                let mut glow_paint = Paint::default();
-                glow_paint.set_color(Color::from_rgba8(
-                    255,
-                    235,
-                    140,
-                    (star_alpha as f32 * 0.18) as u8,
-                ));
-                glow_paint.anti_alias = true;
-                let glow_stroke = Stroke {
-                    width: 2.2,
-                    ..Default::default()
-                };
-                self.pixmap.stroke_path(
-                    &star_path,
-                    &glow_paint,
-                    &glow_stroke,
-                    body_transform,
-                    None,
-                );
-
-                let mut star_paint = Paint::default();
-                star_paint.set_color(Color::from_rgba8(255, 238, 110, star_alpha));
-                star_paint.anti_alias = true;
-                self.pixmap.fill_path(
-                    &star_path,
-                    &star_paint,
-                    FillRule::Winding,
-                    body_transform,
-                    None,
-                );
-
-                let mut star_core_pb = PathBuilder::new();
-                let core_size = star_size * 0.42;
-                star_core_pb.move_to(star_x, star_y - core_size);
-                star_core_pb.quad_to(star_x, star_y, star_x + core_size, star_y);
-                star_core_pb.quad_to(star_x, star_y, star_x, star_y + core_size);
-                star_core_pb.quad_to(star_x, star_y, star_x - core_size, star_y);
-                star_core_pb.quad_to(star_x, star_y, star_x, star_y - core_size);
-                star_core_pb.close();
-                if let Some(core_path) = star_core_pb.finish() {
-                    let mut core_paint = Paint::default();
-                    core_paint.set_color(Color::from_rgba8(255, 255, 255, star_alpha));
-                    core_paint.anti_alias = true;
-                    self.pixmap.fill_path(
-                        &core_path,
-                        &core_paint,
-                        FillRule::Winding,
-                        body_transform,
-                        None,
-                    );
-                }
-            }
-
-            // 2. Draw Floating Starry Crown (星光金皇冠，随呼吸上下差向漂浮)
-            let crown_dy = -breath_wave * 0.18;
-            let crown_transform = body_transform.pre_translate(0.0, crown_dy);
-
-            let mut crown_pb = PathBuilder::new();
-            crown_pb.move_to(20.0, 3.8);
-            crown_pb.line_to(20.0, 1.8);
-            crown_pb.line_to(22.0, 2.8);
-            crown_pb.line_to(24.0, 0.8); // 皇冠中尖
-            crown_pb.line_to(26.0, 2.8);
-            crown_pb.line_to(28.0, 1.8);
-            crown_pb.line_to(28.0, 3.8);
-            crown_pb.close();
-
-            if let Some(cp) = crown_pb.finish() {
-                let crown_stops = vec![
-                    tiny_skia::GradientStop::new(0.0, Color::from_rgba8(255, 235, 120, 255)),
-                    tiny_skia::GradientStop::new(1.0, Color::from_rgba8(255, 170, 40, 255)),
-                ];
-                if let Some(crown_grad) = LinearGradient::new(
-                    tiny_skia::Point::from_xy(24.0, 0.8),
-                    tiny_skia::Point::from_xy(24.0, 3.8),
-                    crown_stops,
-                    tiny_skia::SpreadMode::Pad,
-                    Transform::identity(),
-                ) {
-                    let crown_paint = Paint {
-                        shader: crown_grad,
-                        anti_alias: true,
-                        ..Default::default()
-                    };
-                    self.pixmap.fill_path(
-                        &cp,
-                        &crown_paint,
-                        FillRule::Winding,
-                        crown_transform,
-                        None,
-                    );
-
-                    let mut crown_stroke_paint = Paint::default();
-                    crown_stroke_paint.set_color(Color::from_rgba8(200, 80, 20, 220)); // 橘红细边
-                    crown_stroke_paint.anti_alias = true;
-                    self.pixmap.stroke_path(
-                        &cp,
-                        &crown_stroke_paint,
-                        &Stroke {
-                            width: 0.42,
-                            ..Default::default()
-                        },
-                        crown_transform,
-                        None,
-                    );
-                }
-            }
-
-            // 绘制皇冠顶端的 3 颗微缩星光珍珠
-            let pearl_color = Color::from_rgba8(255, 255, 255, 245);
-            let mut pearl_paint = Paint::default();
-            pearl_paint.set_color(pearl_color);
-            pearl_paint.anti_alias = true;
-            let pearl_r = 0.45f32;
-            for &(px, py) in &[(20.0f32, 1.8f32), (24.0f32, 0.8f32), (28.0f32, 1.8f32)] {
-                if let Some(pr) =
-                    Rect::from_xywh(px - pearl_r, py - pearl_r, pearl_r * 2.0, pearl_r * 2.0)
-                {
-                    let pp = PathBuilder::from_rect(pr);
-                    self.pixmap.fill_path(
-                        &pp,
-                        &pearl_paint,
-                        FillRule::Winding,
-                        crown_transform,
-                        None,
-                    );
-                }
-            }
-
-            // 3. Draw Cosmic Dust Particles (宇宙星尘闪烁小四角星)
-            let star_fade_l = (t * 2.2).sin().abs() * 0.82 + 0.18;
-            let star_fade_r = (t * 2.2 + std::f32::consts::FRAC_PI_2).sin().abs() * 0.82 + 0.18;
-
-            let star_dy_l = (t * 1.6).cos() * 0.50;
-            let star_dy_r = (t * 1.6 + 1.3).sin() * 0.50;
-
-            let build_four_star = |cx: f32, cy: f32, r: f32| -> Option<tiny_skia::Path> {
-                let mut pb = PathBuilder::new();
-                pb.move_to(cx, cy - r);
-                pb.quad_to(cx, cy, cx + r, cy);
-                pb.quad_to(cx, cy, cx, cy + r);
-                pb.quad_to(cx, cy, cx - r, cy);
-                pb.quad_to(cx, cy, cx, cy - r);
-                pb.close();
-                pb.finish()
-            };
-
-            // 左侧星 (x=6.5, y=9.5)
-            if let Some(sp_l) = build_four_star(6.5, 9.5 + star_dy_l, 1.25) {
-                let mut p_paint = Paint::default();
-                p_paint.set_color(Color::from_rgba8(
-                    255,
-                    255,
-                    255,
-                    (255.0 * star_fade_l) as u8,
-                ));
-                p_paint.anti_alias = true;
-                self.pixmap
-                    .fill_path(&sp_l, &p_paint, FillRule::Winding, body_transform, None);
-            }
-            // 右侧星 (x=41.5, y=12.5)
-            if let Some(sp_r) = build_four_star(41.5, 12.5 + star_dy_r, 1.25) {
-                let mut p_paint = Paint::default();
-                p_paint.set_color(Color::from_rgba8(
-                    255,
-                    255,
-                    255,
-                    (255.0 * star_fade_r) as u8,
-                ));
-                p_paint.anti_alias = true;
-                self.pixmap
-                    .fill_path(&sp_r, &p_paint, FillRule::Winding, body_transform, None);
-            }
         }
 
         if style.name == "nimbus" {
@@ -2235,6 +1996,7 @@ impl PetRenderer {
                         }
                     }
                 }
+                "none" => {}
                 _ => {
                     // "rainy" 细雨或默认
                     let build_drop_path = |cx: f32, cy: f32, r: f32| -> Option<tiny_skia::Path> {
@@ -2344,441 +2106,23 @@ impl PetRenderer {
         }
 
         if style.name == "crab" {
-            // 1. 螃蟹特有的背甲对称纹理与呼吸小泡泡
-            // 1.1 背壳对称弧线纹理 (Carapace Grooves)
-            let mut shell_pb = PathBuilder::new();
-            // 左侧壳纹
-            shell_pb.move_to(14.0, 13.5);
-            shell_pb.quad_to(17.0, 14.8, 16.5, 17.5);
-            // 右侧壳纹
-            shell_pb.move_to(34.0, 13.5);
-            shell_pb.quad_to(31.0, 14.8, 31.5, 17.5);
-
-            if let Some(sp) = shell_pb.finish() {
-                let mut shell_paint = Paint::default();
-                shell_paint.set_color(Color::from_rgba8(255, 155, 120, 190)); // 浅橙红色半透明
-                shell_paint.anti_alias = true;
-                self.pixmap.stroke_path(
-                    &sp,
-                    &shell_paint,
-                    &Stroke {
-                        width: 0.6,
-                        ..Default::default()
-                    },
-                    body_transform,
-                    None,
-                );
-            }
-
-            // 1.2 呼吸泡泡动效：从腮部 15.0 升起，随时间淡出并变小破裂
-            if self.pet_state != "sleeping" && (t * 0.35).cos() > -0.3 {
-                // 泡泡 1 (左腮)
-                let bubble_cycle1 = (t * 1.5) % 4.0;
-                let scale1 = bubble_cycle1 / 4.0;
-                let bubble_y1 = 15.0 - bubble_cycle1 * 2.3;
-                let bubble_x1 = 13.0 + (t * 3.5).sin() * 0.9;
-                let r1 = 0.70 * (1.1 - scale1);
-                if r1 > 0.05 {
-                    let mut b1 = PathBuilder::new();
-                    b1.push_circle(bubble_x1, bubble_y1, r1);
-                    if let Some(bp1) = b1.finish() {
-                        let mut b_fill = Paint::default();
-                        b_fill.set_color(Color::from_rgba8(180, 230, 255, 90));
-                        b_fill.anti_alias = true;
-                        self.pixmap.fill_path(
-                            &bp1,
-                            &b_fill,
-                            FillRule::Winding,
-                            body_transform,
-                            None,
-                        );
-
-                        let mut b_stroke = Paint::default();
-                        b_stroke.set_color(Color::from_rgba8(255, 255, 255, 175));
-                        b_stroke.anti_alias = true;
-                        self.pixmap.stroke_path(
-                            &bp1,
-                            &b_stroke,
-                            &Stroke {
-                                width: 0.3,
-                                ..Default::default()
-                            },
-                            body_transform,
-                            None,
-                        );
-                    }
-                }
-
-                // 泡泡 2 (右腮，相位错开)
-                let bubble_cycle2 = (t * 1.5 + 2.0) % 4.0;
-                let scale2 = bubble_cycle2 / 4.0;
-                let bubble_y2 = 15.0 - bubble_cycle2 * 2.3;
-                let bubble_x2 = 35.0 + (t * 3.5 + std::f32::consts::PI).sin() * 0.9;
-                let r2 = 0.50 * (1.1 - scale2);
-                if r2 > 0.05 {
-                    let mut b2 = PathBuilder::new();
-                    b2.push_circle(bubble_x2, bubble_y2, r2);
-                    if let Some(bp2) = b2.finish() {
-                        let mut b_fill = Paint::default();
-                        b_fill.set_color(Color::from_rgba8(180, 230, 255, 75));
-                        b_fill.anti_alias = true;
-                        self.pixmap.fill_path(
-                            &bp2,
-                            &b_fill,
-                            FillRule::Winding,
-                            body_transform,
-                            None,
-                        );
-
-                        let mut b_stroke = Paint::default();
-                        b_stroke.set_color(Color::from_rgba8(255, 255, 255, 150));
-                        b_stroke.anti_alias = true;
-                        self.pixmap.stroke_path(
-                            &bp2,
-                            &b_stroke,
-                            &Stroke {
-                                width: 0.25,
-                                ..Default::default()
-                            },
-                            body_transform,
-                            None,
-                        );
-                    }
-                }
-            }
-
-            // 2. Draw 6 Crab legs (左右各 3 条蟹脚)
-            // 间歇性运动包络：每隔 11 秒，划沙子 3.5 秒，且和钳子时间错开
-            let leg_active_wave = (anim_t * 0.57 + 1.8).cos();
-            let leg_intensity = ((leg_active_wave - 0.2) / 0.45).clamp(0.0, 1.0);
-
-            let leg_x_anchors_l = [11.0, 15.0, 19.0];
-            let leg_x_anchors_r = [29.0, 33.0, 37.0];
-
-            for i in 0..3 {
-                let idx = i as f32;
-                let leg_t = anim_t * 12.0 + idx * 2.0;
-                let dx = leg_t.sin() * 1.4 * leg_intensity * anim_amplitude;
-                let dy = (leg_t + 0.8).cos() * 0.7 * leg_intensity * anim_amplitude;
-
-                // 左侧脚 (向左下方弯曲)
-                let x_l = leg_x_anchors_l[i];
-                let mut leg_pb = PathBuilder::new();
-                leg_pb.move_to(x_l, 18.5);
-                leg_pb.cubic_to(
-                    x_l - 1.5 + dx,
-                    20.5 + dy,
-                    x_l - 3.5 + dx,
-                    22.5 + dy,
-                    x_l - 3.0 + dx,
-                    24.5 + dy,
-                );
-                leg_pb.cubic_to(
-                    x_l - 2.0 + dx,
-                    22.5 + dy,
-                    x_l - 0.5 + dx,
-                    21.0 + dy,
-                    x_l + 1.2,
-                    18.5,
-                );
-                leg_pb.close();
-                if let Some(p) = leg_pb.finish() {
-                    let mut leg_paint = Paint::default();
-                    leg_paint.set_color(Color::from_rgba8(255, 120, 100, 255));
-                    leg_paint.anti_alias = true;
-                    self.pixmap
-                        .fill_path(&p, &leg_paint, FillRule::Winding, body_transform, None);
-
-                    let mut stroke = Paint::default();
-                    stroke.set_color(style.outer_rim_color);
-                    stroke.anti_alias = true;
-                    self.pixmap.stroke_path(
-                        &p,
-                        &stroke,
-                        &Stroke {
-                            width: 0.5,
-                            ..Default::default()
-                        },
-                        body_transform,
-                        None,
-                    );
-                }
-
-                // 右侧脚 (向右下方弯曲)
-                let x_r = leg_x_anchors_r[i];
-                let mut leg_r_pb = PathBuilder::new();
-                leg_r_pb.move_to(x_r, 18.5);
-                leg_r_pb.cubic_to(
-                    x_r + 1.5 + dx,
-                    20.5 + dy,
-                    x_r + 3.5 + dx,
-                    22.5 + dy,
-                    x_r + 3.0 + dx,
-                    24.5 + dy,
-                );
-                leg_r_pb.cubic_to(
-                    x_r + 2.0 + dx,
-                    22.5 + dy,
-                    x_r + 0.5 + dx,
-                    21.0 + dy,
-                    x_r - 1.2,
-                    18.5,
-                );
-                leg_r_pb.close();
-                if let Some(p) = leg_r_pb.finish() {
-                    let mut leg_paint = Paint::default();
-                    leg_paint.set_color(Color::from_rgba8(255, 120, 100, 255));
-                    leg_paint.anti_alias = true;
-                    self.pixmap
-                        .fill_path(&p, &leg_paint, FillRule::Winding, body_transform, None);
-
-                    let mut stroke = Paint::default();
-                    stroke.set_color(style.outer_rim_color);
-                    stroke.anti_alias = true;
-                    self.pixmap.stroke_path(
-                        &p,
-                        &stroke,
-                        &Stroke {
-                            width: 0.5,
-                            ..Default::default()
-                        },
-                        body_transform,
-                        None,
-                    );
-                }
-            }
-
-            // 3. Draw Crab Claws (左右大螯，间歇性开合与挥舞)
-            // 钳子动作包络：每隔约 17 秒，舞动和快速“咔嚓” 4.5 秒
-            let claw_active_wave = (anim_t * 0.37 + 0.8).sin();
-            let claw_intensity = ((claw_active_wave - 0.25) / 0.4).clamp(0.0, 1.0);
-
-            let claw_t = anim_t * 6.5;
-            let claw_open = (claw_t * 3.0).sin().abs() * 3.8 * claw_intensity * anim_amplitude; // 仅在包络期开合
-            let left_claw_wave = (claw_t).cos() * 0.16 * claw_intensity * anim_amplitude;
-            let right_claw_wave = -(claw_t + 0.6).cos() * 0.16 * claw_intensity * anim_amplitude;
-
-            // 左大螯臂
-            let mut left_arm = PathBuilder::new();
-            left_arm.move_to(11.0, 14.5);
-            left_arm.cubic_to(
-                7.0,
-                13.0 + left_claw_wave * 5.0,
-                4.0,
-                10.0 + left_claw_wave * 8.0,
-                5.0,
-                8.0 + left_claw_wave * 6.0,
-            );
-            left_arm.line_to(7.5, 9.5 + left_claw_wave * 5.0);
-            left_arm.close();
-            if let Some(ap) = left_arm.finish() {
-                let mut arm_paint = Paint::default();
-                arm_paint.set_color(Color::from_rgba8(255, 100, 80, 255));
-                arm_paint.anti_alias = true;
-                self.pixmap
-                    .fill_path(&ap, &arm_paint, FillRule::Winding, body_transform, None);
-
-                let mut stroke = Paint::default();
-                stroke.set_color(style.outer_rim_color);
-                stroke.anti_alias = true;
-                self.pixmap.stroke_path(
-                    &ap,
-                    &stroke,
-                    &Stroke {
-                        width: 0.5,
-                        ..Default::default()
-                    },
-                    body_transform,
-                    None,
-                );
-            }
-
-            // 左大螯钳子 (内固定瓣 + 外活动瓣)
-            let mut l_claw_inner = PathBuilder::new();
-            // 内侧咬合面：从底座跟外瓣贴合，到尖端 (几乎平直)
-            l_claw_inner.move_to(5.0, 8.0 + left_claw_wave * 6.0);
-            l_claw_inner.cubic_to(
-                4.4,
-                6.5 + left_claw_wave * 6.0,
-                3.8,
-                4.5 + left_claw_wave * 6.0,
-                2.6,
-                2.2 + left_claw_wave * 6.0,
-            );
-            // 身体侧边缘：从尖端回到内侧底座 (7.5, 9.5)，平缓弧线
-            l_claw_inner.cubic_to(
-                4.0,
-                4.0 + left_claw_wave * 6.0,
-                5.8,
-                6.5 + left_claw_wave * 5.0,
-                7.5,
-                9.5 + left_claw_wave * 5.0,
-            );
-            l_claw_inner.close();
-
-            let mut l_claw_outer = PathBuilder::new();
-            l_claw_outer.move_to(5.0, 8.0 + left_claw_wave * 6.0);
-            // 外侧圆润曲线 (大幅向外鼓起)
-            l_claw_outer.cubic_to(
-                0.5 - claw_open * 0.8,
-                7.0 + left_claw_wave * 6.0,
-                0.8 - claw_open * 0.9,
-                4.0 + left_claw_wave * 6.0,
-                2.6 - claw_open,
-                2.2 + left_claw_wave * 6.0,
-            );
-            // 内侧咬合面 (相对平直)
-            l_claw_outer.cubic_to(
-                3.8 - claw_open * 0.5,
-                4.5 + left_claw_wave * 6.0,
-                4.4 - claw_open * 0.2,
-                6.5 + left_claw_wave * 6.0,
-                5.0,
-                8.0 + left_claw_wave * 6.0,
-            );
-            l_claw_outer.close();
-
-            for p in [l_claw_inner.finish(), l_claw_outer.finish()]
-                .into_iter()
-                .flatten()
-            {
-                let mut claw_paint = Paint::default();
-                claw_paint.set_color(Color::from_rgba8(255, 75, 60, 255));
-                claw_paint.anti_alias = true;
-                self.pixmap
-                    .fill_path(&p, &claw_paint, FillRule::Winding, body_transform, None);
-
-                let mut stroke = Paint::default();
-                stroke.set_color(style.outer_rim_color);
-                stroke.anti_alias = true;
-                self.pixmap.stroke_path(
-                    &p,
-                    &stroke,
-                    &Stroke {
-                        width: 0.5,
-                        ..Default::default()
-                    },
-                    body_transform,
-                    None,
-                );
-            }
-
-            // 右大螯臂
-            let mut right_arm = PathBuilder::new();
-            right_arm.move_to(37.0, 14.5);
-            right_arm.cubic_to(
-                41.0,
-                13.0 + right_claw_wave * 5.0,
-                44.0,
-                10.0 + right_claw_wave * 8.0,
-                43.0,
-                8.0 + right_claw_wave * 6.0,
-            );
-            right_arm.line_to(40.5, 9.5 + right_claw_wave * 5.0);
-            right_arm.close();
-            if let Some(ap) = right_arm.finish() {
-                let mut arm_paint = Paint::default();
-                arm_paint.set_color(Color::from_rgba8(255, 100, 80, 255));
-                arm_paint.anti_alias = true;
-                self.pixmap
-                    .fill_path(&ap, &arm_paint, FillRule::Winding, body_transform, None);
-
-                let mut stroke = Paint::default();
-                stroke.set_color(style.outer_rim_color);
-                stroke.anti_alias = true;
-                self.pixmap.stroke_path(
-                    &ap,
-                    &stroke,
-                    &Stroke {
-                        width: 0.5,
-                        ..Default::default()
-                    },
-                    body_transform,
-                    None,
-                );
-            }
-
-            // 右大螯钳子 (内固定瓣 + 外活动瓣)
-            let mut r_claw_inner = PathBuilder::new();
-            // 内侧咬合面：从底座跟外瓣贴合，到尖端 (几乎平直)
-            r_claw_inner.move_to(43.0, 8.0 + right_claw_wave * 6.0);
-            r_claw_inner.cubic_to(
-                43.6,
-                6.5 + right_claw_wave * 6.0,
-                44.2,
-                4.5 + right_claw_wave * 6.0,
-                45.4,
-                2.2 + right_claw_wave * 6.0,
-            );
-            // 身体侧边缘：从尖端回到内侧底座 (40.5, 9.5)，平缓弧线
-            r_claw_inner.cubic_to(
-                44.0,
-                4.0 + right_claw_wave * 6.0,
-                42.2,
-                6.5 + right_claw_wave * 5.0,
-                40.5,
-                9.5 + right_claw_wave * 5.0,
-            );
-            r_claw_inner.close();
-
-            let mut r_claw_outer = PathBuilder::new();
-            r_claw_outer.move_to(43.0, 8.0 + right_claw_wave * 6.0);
-            // 外侧圆润曲线 (大幅向外鼓起)
-            r_claw_outer.cubic_to(
-                47.5 + claw_open * 0.8,
-                7.0 + right_claw_wave * 6.0,
-                47.2 + claw_open * 0.9,
-                4.0 + right_claw_wave * 6.0,
-                45.4 + claw_open,
-                2.2 + right_claw_wave * 6.0,
-            );
-            // 内侧咬合面 (相对平直)
-            r_claw_outer.cubic_to(
-                44.2 + claw_open * 0.5,
-                4.5 + right_claw_wave * 6.0,
-                43.6 + claw_open * 0.2,
-                6.5 + right_claw_wave * 6.0,
-                43.0,
-                8.0 + right_claw_wave * 6.0,
-            );
-            r_claw_outer.close();
-
-            for p in [r_claw_inner.finish(), r_claw_outer.finish()]
-                .into_iter()
-                .flatten()
-            {
-                let mut claw_paint = Paint::default();
-                claw_paint.set_color(Color::from_rgba8(255, 75, 60, 255));
-                claw_paint.anti_alias = true;
-                self.pixmap
-                    .fill_path(&p, &claw_paint, FillRule::Winding, body_transform, None);
-
-                let mut stroke = Paint::default();
-                stroke.set_color(style.outer_rim_color);
-                stroke.anti_alias = true;
-                self.pixmap.stroke_path(
-                    &p,
-                    &stroke,
-                    &Stroke {
-                        width: 0.5,
-                        ..Default::default()
-                    },
-                    body_transform,
-                    None,
-                );
-            }
+            crate::art::crab_limbs(&mut self.pixmap, &mut self.body_mask, body_transform, anim_t, anim_amplitude);
+            crate::art::material(&mut self.pixmap, &body_path, body_transform, style.name);
         }
+
+        crate::art::sewn_details(&mut self.pixmap, body_transform, style.name);
 
         // 2. Draw Eyes
         let eye_transform = body_transform.pre_translate(eye_tx, eye_ty);
-        let flow_offset = (2.0 * std::f32::consts::PI * t / 4.8).sin() * 4.8;
+        let iris = crate::art::palette(style.name);
+        let flow_offset = 0.0;
         let eye_grad = LinearGradient::new(
-            tiny_skia::Point::from_xy(12.0, 3.0 + flow_offset),
-            tiny_skia::Point::from_xy(12.0, 21.0 + flow_offset),
+            tiny_skia::Point::from_xy(12.0, style.eye_y - 2.0 + flow_offset),
+            tiny_skia::Point::from_xy(12.0, style.eye_y + 2.0 + flow_offset),
             vec![
-                tiny_skia::GradientStop::new(0.0, Color::from_rgba8(177, 167, 255, 255)),
-                tiny_skia::GradientStop::new(0.5, Color::from_rgba8(122, 157, 255, 255)),
-                tiny_skia::GradientStop::new(1.0, Color::from_rgba8(57, 65, 255, 255)),
+                tiny_skia::GradientStop::new(0.0, iris.ink),
+                tiny_skia::GradientStop::new(0.5, iris.edge),
+                tiny_skia::GradientStop::new(1.0, iris.shade),
             ],
             tiny_skia::SpreadMode::Pad,
             Transform::identity(),
@@ -2978,7 +2322,7 @@ impl PetRenderer {
         let blush_y_offset = breath_wave * 0.10;
 
         let mut blush_paint = Paint::default();
-        blush_paint.set_color(Color::from_rgba8(255, 160, 175, blush_alpha));
+        blush_paint.set_color(Color::from_rgba8(222, 149, 134, blush_alpha));
         blush_paint.anti_alias = true;
 
         let build_blush_oval = |bx: f32, by: f32, bw: f32, bh: f32| -> Option<tiny_skia::Path> {
@@ -3018,14 +2362,15 @@ impl PetRenderer {
         }
 
         // 4. Draw Eased Mouth
-        let cx = if style.name == "crab" {
+        let cx = if matches!(style.name, "crab" | "starlit" | "nimbus") {
             24.0f32
         } else {
             12.0f32
         };
         let mouth_y = style.mouth_y + blush_y_offset;
+        crate::art::nose(&mut self.pixmap, body_transform, style.name, cx, mouth_y - 1.1);
 
-        let half_w = 0.5 * self.mouth_width_lerp;
+        let half_w = if style.name == "starlit" { 0.7 } else { 0.62 } * self.mouth_width_lerp;
         let lx = cx - half_w;
         let rx = cx + half_w;
 
@@ -3072,7 +2417,7 @@ impl PetRenderer {
 
             if self.mouth_open_lerp > 0.08 {
                 // Fill mouth cavity in dark grey
-                mouth_paint.set_color(Color::from_rgba8(74, 85, 104, 230));
+                mouth_paint.set_color(Color::from_rgba8(104, 65, 70, 240));
                 self.pixmap.fill_path(
                     &mouth_path,
                     &mouth_paint,
@@ -3083,7 +2428,7 @@ impl PetRenderer {
             }
 
             let mut stroke_paint = Paint::default();
-            stroke_paint.set_color(Color::from_rgba8(45, 55, 72, 220));
+            stroke_paint.set_color(Color::from_rgba8(83, 63, 67, 235));
             stroke_paint.anti_alias = true;
             self.pixmap.stroke_path(
                 &mouth_path,
@@ -3104,7 +2449,7 @@ impl PetRenderer {
             let centers = if style.name == "crab" {
                 vec![13.0f32, 35.0f32]
             } else {
-                vec![14.5f32]
+                vec![cx + 2.5]
             };
 
             for &b_cx in &centers {
@@ -3140,40 +2485,35 @@ impl PetRenderer {
                 }
             }
 
-            // Draw floating visible zZ glyphs above the head.
-            for i in 0..3 {
-                let phase = (t * 0.45 + i as f32 * 0.32) % 1.0;
+            // Two quiet stitched sleep marks, contained in the physical window.
+            for i in 0..2 {
+                let phase = (t * 0.25 + i as f32 * 0.35) % 1.0;
                 let fade = (1.0 - phase).powf(0.8);
-                let drift = (t * 1.3 + i as f32).sin() * 0.65;
-                let base_z_x = if style.name == "crab" { 26.0 } else { 17.0 };
-                let z_ox = base_z_x + drift + i as f32 * 1.2;
-                let z_oy = 4.2 - phase * 8.0 - i as f32 * 1.7;
-                let size_z = 1.45 + i as f32 * 0.28 + phase * 0.78;
-
-                let mut z_pb = PathBuilder::new();
-                z_pb.move_to(z_ox - size_z, z_oy - size_z * 0.72);
-                z_pb.line_to(z_ox + size_z, z_oy - size_z * 0.72);
-                z_pb.line_to(z_ox - size_z, z_oy + size_z * 0.72);
-                z_pb.line_to(z_ox + size_z, z_oy + size_z * 0.72);
-
-                if let Some(z_path) = z_pb.finish() {
-                    let mut z_paint = Paint::default();
-                    z_paint.set_color(Color::from_rgba8(
-                        110,
-                        140,
-                        255,
-                        (fade * 210.0 * self.sleep_bubble_lerp) as u8,
-                    ));
-                    z_paint.anti_alias = true;
+                let z_x = cx + 5.8 + i as f32 * 3.8;
+                let z_y = 3.2 - phase * 3.0 - i as f32 * 2.8;
+                let size = 1.1 + i as f32 * 0.18;
+                let mut path = PathBuilder::new();
+                path.move_to(z_x - size, z_y - size * 0.72);
+                path.line_to(z_x + size, z_y - size * 0.72);
+                path.line_to(z_x - size, z_y + size * 0.72);
+                path.line_to(z_x + size, z_y + size * 0.72);
+                if let Some(path) = path.finish().and_then(|path| path.transform(body_transform)) {
+                    let bounds = path.bounds();
+                    let width = 0.38 * view_scale;
+                    let margin = width * 0.5 + 1.0;
+                    let max_x = (self.pixmap.width() as f32 - bounds.width() - margin).max(margin);
+                    let max_y = (self.pixmap.height() as f32 - bounds.height() - margin).max(margin);
+                    let dx = bounds.left().clamp(margin, max_x) - bounds.left();
+                    let dy = bounds.top().clamp(margin, max_y) - bounds.top();
+                    let mut color = crate::art::palette(style.name).edge;
+                    color.set_alpha(fade * 0.8 * self.sleep_bubble_lerp);
+                    let mut paint = Paint::default();
+                    paint.set_color(color);
+                    paint.anti_alias = true;
                     self.pixmap.stroke_path(
-                        &z_path,
-                        &z_paint,
-                        &Stroke {
-                            width: 0.56,
-                            ..Default::default()
-                        },
-                        body_transform,
-                        None,
+                        &path, &paint,
+                        &Stroke { width, line_cap: tiny_skia::LineCap::Round, ..Stroke::default() },
+                        Transform::from_translate(dx, dy), None,
                     );
                 }
             }
@@ -3221,7 +2561,7 @@ fn draw_eye(
 
         if let Some(stalk_path) = stalk_pb.finish() {
             let mut stalk_paint = Paint::default();
-            stalk_paint.set_color(Color::from_rgba8(255, 100, 80, 255)); // 珊瑚红橙色
+            stalk_paint.set_color(crate::art::palette("crab").body); // 珊瑚红橙色
             stalk_paint.anti_alias = true;
             pixmap.fill_path(
                 &stalk_path,
@@ -3232,7 +2572,7 @@ fn draw_eye(
             );
 
             let mut stalk_stroke = Paint::default();
-            stalk_stroke.set_color(Color::from_rgba8(100, 20, 15, 255));
+            stalk_stroke.set_color(crate::art::palette("crab").edge);
             stalk_stroke.anti_alias = true;
             pixmap.stroke_path(
                 &stalk_path,
@@ -3254,7 +2594,7 @@ fn draw_eye(
             closed_pb.quad_to(cx, cy + 0.25, cx + 0.6, cy);
             if let Some(p) = closed_pb.finish() {
                 let mut lash_paint = Paint::default();
-                lash_paint.set_color(Color::from_rgba8(35, 40, 68, 240));
+                lash_paint.set_color(Color::from_rgba8(72, 57, 62, 240));
                 lash_paint.anti_alias = true;
                 pixmap.stroke_path(
                     &p,
@@ -3277,12 +2617,12 @@ fn draw_eye(
             eye_pb.push_circle(cx, cy, eye_r);
             if let Some(p) = eye_pb.finish() {
                 let mut eye_p = Paint::default();
-                eye_p.set_color(Color::from_rgba8(22, 28, 45, 255)); // 深亮乌黑眼珠
+                eye_p.set_color(Color::from_rgba8(67, 53, 55, 255)); // 深亮乌黑眼珠
                 eye_p.anti_alias = true;
                 pixmap.fill_path(&p, &eye_p, FillRule::Winding, transform, None);
 
                 let mut stroke = Paint::default();
-                stroke.set_color(Color::from_rgba8(100, 20, 15, 255));
+                stroke.set_color(crate::art::palette("crab").edge);
                 stroke.anti_alias = true;
                 pixmap.stroke_path(
                     &p,
@@ -3314,7 +2654,7 @@ fn draw_eye(
             highlight_pb.push_circle(hx, hy, 0.32 * eye_r);
             if let Some(p) = highlight_pb.finish() {
                 let mut hl_paint = Paint::default();
-                hl_paint.set_color(Color::from_rgba8(255, 255, 255, 255));
+                hl_paint.set_color(Color::from_rgba8(255, 248, 224, 255));
                 hl_paint.anti_alias = true;
                 pixmap.fill_path(&p, &hl_paint, FillRule::Winding, transform, None);
             }
@@ -3499,7 +2839,7 @@ fn draw_eye(
                 let mut p_paint = Paint::default();
                 p_paint.set_color(pupil_color);
                 p_paint.anti_alias = true;
-                let p_path = PathBuilder::from_rect(pr);
+                let p_path = PathBuilder::from_oval(pr).unwrap();
                 pixmap.fill_path(&p_path, &p_paint, FillRule::Winding, transform, None);
             }
 
@@ -3556,8 +2896,8 @@ fn draw_eye(
 
     let mut pb = PathBuilder::new();
     pb.move_to(lx, cy);
-    pb.quad_to(cx, cy + top_lid_offset, rx, cy);
-    pb.quad_to(cx, cy + bottom_lid_offset, lx, cy);
+    pb.cubic_to(lx, cy + top_lid_offset * 1.3, rx, cy + top_lid_offset * 1.3, rx, cy);
+    pb.cubic_to(rx, cy + bottom_lid_offset * 1.3, lx, cy + bottom_lid_offset * 1.3, lx, cy);
     pb.close();
 
     if let Some(eye_path) = pb.finish() {
@@ -3565,10 +2905,10 @@ fn draw_eye(
 
         // 1. Draw bold slate eyeliner
         let mut eyeliner_paint = Paint::default();
-        eyeliner_paint.set_color(Color::from_rgba8(35, 40, 68, 230));
+        eyeliner_paint.set_color(crate::art::palette(pet_style).ink);
         eyeliner_paint.anti_alias = true;
         let eyeliner_stroke = Stroke {
-            width: 0.38,
+            width: 0.26,
             ..Default::default()
         };
         pixmap.stroke_path(
@@ -3581,15 +2921,15 @@ fn draw_eye(
 
         // 2. Draw Bottom Iris Reflection Glow
         let glow_r_w = w * 0.32;
-        let glow_r_h = h * 0.16;
-        let glow_cy = cy + h * 0.22;
+        let glow_r_h = current_h * 0.10;
+        let glow_cy = cy + current_h * 0.22;
         if let Some(gr) = Rect::from_xywh(
             cx - glow_r_w,
             glow_cy - glow_r_h,
             glow_r_w * 2.0,
             glow_r_h * 2.0,
         ) {
-            let glow_path = PathBuilder::from_rect(gr);
+            let glow_path = PathBuilder::from_oval(gr).unwrap();
             let mut glow_paint = Paint::default();
             let gc = match pet_style {
                 "mochi" => Color::from_rgba8(190, 255, 170, 140),
@@ -3698,7 +3038,7 @@ fn draw_eye(
                             (250.0 * pupil_opacity_lerp) as u8,
                         ));
                         h_paint.anti_alias = true;
-                        let h_path = PathBuilder::from_rect(hr);
+                        let h_path = PathBuilder::from_oval(hr).unwrap();
                         pixmap.fill_path(&h_path, &h_paint, FillRule::Winding, transform, None);
                     }
                 }
@@ -3770,7 +3110,7 @@ fn draw_eye(
                             (250.0 * pupil_opacity_lerp) as u8,
                         ));
                         h_paint.anti_alias = true;
-                        let h_path = PathBuilder::from_rect(hr);
+                        let h_path = PathBuilder::from_oval(hr).unwrap();
                         pixmap.fill_path(&h_path, &h_paint, FillRule::Winding, transform, None);
                     }
                 }
@@ -3787,7 +3127,7 @@ fn draw_eye(
                     let mut p_paint = Paint::default();
                     p_paint.set_color(pupil_base_color);
                     p_paint.anti_alias = true;
-                    let p_path = PathBuilder::from_rect(pr);
+                    let p_path = PathBuilder::from_oval(pr).unwrap();
                     pixmap.fill_path(&p_path, &p_paint, FillRule::Winding, transform, None);
                 }
 
@@ -3871,24 +3211,24 @@ fn draw_eye(
             } else {
                 // 普通瞳孔绘制
                 let pupil_color = match pet_style {
-                    "mochi" => Color::from_rgba8(25, 60, 42, (240.0 * pupil_opacity_lerp) as u8),
-                    _ => Color::from_rgba8(25, 30, 95, (240.0 * pupil_opacity_lerp) as u8),
+                    "mochi" => Color::from_rgba8(55, 62, 47, (240.0 * pupil_opacity_lerp) as u8),
+                    _ => Color::from_rgba8(61, 52, 63, (240.0 * pupil_opacity_lerp) as u8),
                 };
 
-                let p_r = w * 0.35 * pupil_scale_lerp;
+                let p_r = (w * 0.31 * pupil_scale_lerp).min(current_h * 0.27);
                 if let Some(pr) =
                     Rect::from_xywh(pupil_cx - p_r, pupil_cy - p_r, p_r * 2.0, p_r * 2.0)
                 {
                     let mut p_paint = Paint::default();
                     p_paint.set_color(pupil_color);
                     p_paint.anti_alias = true;
-                    let p_path = PathBuilder::from_rect(pr);
+                    let p_path = PathBuilder::from_oval(pr).unwrap();
                     pixmap.fill_path(&p_path, &p_paint, FillRule::Winding, transform, None);
                 }
 
                 // 4. Double Sparkle Highlights
                 // Primary Highlight (Large, Upper-Left)
-                let h_r = w * 0.17 * pupil_scale_lerp;
+                let h_r = (w * 0.12 * pupil_scale_lerp).min(current_h * 0.13);
                 let h_cx = pupil_cx - w * 0.11;
                 let h_cy = pupil_cy - current_h * 0.11;
                 if let Some(hr) = Rect::from_xywh(h_cx - h_r, h_cy - h_r, h_r * 2.0, h_r * 2.0) {
@@ -3900,12 +3240,12 @@ fn draw_eye(
                         (245.0 * pupil_opacity_lerp) as u8,
                     ));
                     h_paint.anti_alias = true;
-                    let h_path = PathBuilder::from_rect(hr);
+                    let h_path = PathBuilder::from_oval(hr).unwrap();
                     pixmap.fill_path(&h_path, &h_paint, FillRule::Winding, transform, None);
                 }
 
                 // Secondary Highlight (Small, Semi-transparent, Bottom-Right)
-                let h2_r = w * 0.09 * pupil_scale_lerp;
+                let h2_r = (w * 0.055 * pupil_scale_lerp).min(current_h * 0.08);
                 let h2_cx = pupil_cx + w * 0.13;
                 let h2_cy = pupil_cy + current_h * 0.13;
                 if let Some(h2r) =
@@ -3919,7 +3259,7 @@ fn draw_eye(
                         (180.0 * pupil_opacity_lerp) as u8,
                     ));
                     h2_paint.anti_alias = true;
-                    let h2_path = PathBuilder::from_rect(h2r);
+                    let h2_path = PathBuilder::from_oval(h2r).unwrap();
                     pixmap.fill_path(&h2_path, &h2_paint, FillRule::Winding, transform, None);
                 }
             }
@@ -3942,6 +3282,46 @@ mod tests {
     fn alpha_at(renderer: &PetRenderer, x: u32, y: u32) -> u8 {
         let idx = ((y * renderer.pixmap.width() + x) * 4 + 3) as usize;
         renderer.pixmap.data()[idx]
+    }
+
+    #[test]
+    #[ignore = "writes visual snapshots to /tmp for manual inspection"]
+    fn render_style_snapshots() {
+        let output_dir = std::path::Path::new("/tmp/nimbus-style-gallery");
+        std::fs::create_dir_all(output_dir).unwrap();
+        for style in ["nimbus", "mochi", "starlit", "crab"] {
+            for state in ["idle", "tickled", "sleeping"] {
+                let height = if style == "nimbus" { 189 } else { 175 };
+                let mut renderer = PetRenderer::new(308, height);
+                renderer.draw_bubble_enabled = false;
+                renderer.active_style = style.to_string();
+                renderer.active_weather = "none".to_string();
+                renderer.pet_state = state.to_string();
+                renderer.start_time = std::time::Instant::now() - std::time::Duration::from_secs(1);
+                renderer.last_frame_time = 1.0;
+                renderer.anim_time = 1.0;
+                renderer.top_lid_lerp = -1.0;
+                renderer.bottom_lid_lerp = 1.0;
+                renderer.pupil_scale_lerp = 0.56;
+                renderer.pointer_x = 19.0;
+                renderer.pointer_y = 8.0;
+                if state == "tickled" {
+                    renderer.top_lid_lerp = -0.45;
+                    renderer.bottom_lid_lerp = -0.4;
+                    renderer.pupil_opacity_lerp = 0.0;
+                    renderer.mouth_open_lerp = 0.9;
+                    renderer.mouth_width_lerp = 1.8;
+                    renderer.touch_lerp = 1.0;
+                    renderer.happiness = 0.85;
+                } else if state == "sleeping" {
+                    renderer.pupil_opacity_lerp = 0.0;
+                    renderer.sleep_bubble_lerp = 1.0;
+                    renderer.gaze_active_lerp = 0.0;
+                }
+                renderer.update_and_draw();
+                renderer.pixmap.save_png(output_dir.join(format!("{style}-{state}.png"))).unwrap();
+            }
+        }
     }
 
     #[test]
@@ -3986,6 +3366,106 @@ mod tests {
         );
         let bottom_tail_alpha = alpha_at(&renderer, renderer.pixmap.width() / 2, bottom_tail_y);
         assert!(bottom_tail_alpha > 0);
+    }
+
+    #[test]
+    fn bubble_truncation_preserves_source_and_respects_visible_limits() {
+        let mut renderer = PetRenderer::new(320, 120);
+        renderer.draw_pet_enabled = false;
+        renderer.set_font_size(32.0);
+        let source = "云朵陪你慢慢阅读，今天也有值得记住的小事情。".repeat(12);
+        renderer.set_text(&source);
+        renderer.set_bubble_limits(300.0, 200.0, 4);
+
+        let (width, height) = renderer.measure_bubble_size();
+        let visible = renderer.text_buffer.lines.iter()
+            .map(|line| line.text()).collect::<Vec<_>>().join("\n");
+        assert!(width <= 300.0 && height <= 200.0);
+        assert!(renderer.text_buffer.layout_runs().count() <= 4);
+        assert!(visible.contains('…'));
+        assert!(visible.contains("托盘查看全文"));
+        assert_eq!(renderer.full_text, source);
+
+        renderer.set_bubble_limits(420.0, 4000.0, 100);
+        renderer.measure_bubble_size();
+        let restored = renderer.text_buffer.lines.iter()
+            .map(|line| line.text()).collect::<Vec<_>>().join("\n");
+        assert_eq!(restored, source);
+    }
+
+    #[test]
+    fn bubble_hides_without_room_for_a_glyph_and_recovers_when_space_returns() {
+        let mut renderer = PetRenderer::new(120, 80);
+        renderer.draw_pet_enabled = false;
+        renderer.set_text("保留这条完整消息");
+        for (width, height) in [(1.0, 500.0), (420.0, 1.0), (1.0, 1.0)] {
+            renderer.set_bubble_limits(width, height, 8);
+            assert_eq!(renderer.measure_bubble_size(), (0.0, 0.0));
+            assert_eq!(renderer.measure_bubble_size(), (0.0, 0.0));
+            assert!(renderer.has_text());
+        }
+        renderer.set_bubble_limits(420.0, 360.0, 8);
+        let (width, height) = renderer.measure_bubble_size();
+        assert!(width > 0.0 && height > 0.0);
+        assert_eq!(renderer.text_buffer.lines[0].text(), "保留这条完整消息");
+    }
+
+    #[test]
+    fn narrow_single_line_bubble_uses_a_compact_ellipsis() {
+        let mut renderer = PetRenderer::new(120, 80);
+        renderer.draw_pet_enabled = false;
+        renderer.set_font_size(20.0);
+        renderer.set_bubble_limits(96.0, 64.0, 1);
+        renderer.set_text("这是一条需要省略但不能破坏气泡布局的长消息");
+        let (width, height) = renderer.measure_bubble_size();
+        assert!(width <= 96.0 && height <= 64.0);
+        assert_eq!(renderer.text_buffer.layout_runs().count(), 1);
+        assert!(renderer.text_buffer.lines[0].text().ends_with('…'));
+    }
+
+    #[test]
+    fn independent_tail_follows_anchor_without_entering_rounded_corners() {
+        let mut renderer = PetRenderer::new(320, 120);
+        renderer.draw_pet_enabled = false;
+        renderer.set_text("尾巴跟着身边的小云朵");
+        let (width, height) = renderer.measure_bubble_size();
+        renderer.resize(width as u32, height as u32);
+        renderer.bubble_on_bottom = true;
+        let y = renderer.bubble_edge_safe_pad().ceil() as u32;
+        for anchor in [-100.0, width + 100.0] {
+            renderer.bubble_tail_x = Some(anchor);
+            renderer.update_and_draw();
+            let inset = renderer.bubble_edge_safe_pad() + 19.5 * renderer.scale_factor;
+            let expected_x = anchor.clamp(inset, width - inset).round() as u32;
+            assert!((expected_x.saturating_sub(1)..=expected_x + 1)
+                .any(|x| alpha_at(&renderer, x, y) > 0));
+            assert_eq!(alpha_at(&renderer, renderer.pixmap.width() / 2, y), 0);
+        }
+    }
+
+    #[test]
+    #[ignore = "writes bubble snapshots to /tmp for manual inspection"]
+    fn render_bubble_snapshots() {
+        let output_dir = std::path::Path::new("/tmp/nimbus-bubble-review");
+        std::fs::create_dir_all(output_dir).unwrap();
+        for scale in [1.0, 2.0] {
+            for on_bottom in [false, true] {
+                let mut renderer = PetRenderer::new(320, 120);
+                renderer.draw_pet_enabled = false;
+                renderer.scale_factor = scale;
+                renderer.set_font_size(32.0);
+                renderer.set_bubble_limits(340.0 * scale, 220.0 * scale, 4);
+                renderer.set_text(&"屏幕边缘也能读清消息。🌥️ Nimbus 会保留完整内容，方便稍后查看。".repeat(4));
+                let (width, height) = renderer.measure_bubble_size();
+                renderer.resize(width as u32, height as u32);
+                renderer.bubble_on_bottom = on_bottom;
+                renderer.bubble_tail_x = Some(if on_bottom { width - 12.0 } else { 12.0 });
+                renderer.update_and_draw();
+                renderer.pixmap.save_png(output_dir.join(format!(
+                    "bubble-{}x-{}.png", scale as u32, if on_bottom { "below" } else { "above" }
+                ))).unwrap();
+            }
+        }
     }
 
     #[test]

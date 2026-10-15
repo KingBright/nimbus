@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
 pub struct PetMemory {
     // app name -> active count
     pub app_usage: HashMap<String, u32>,
@@ -32,24 +34,44 @@ impl PetMemory {
     }
 
     pub fn load_or_create() -> Self {
-        let path = Self::get_path();
-        if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
-                if let Ok(mut memory) = serde_json::from_str::<Self>(&content) {
+        Self::load_from_path(&Self::get_path())
+    }
+
+    fn load_from_path(path: &Path) -> Self {
+        match fs::read_to_string(path) {
+            Ok(content) => match serde_json::from_str::<Self>(&content) {
+                Ok(mut memory) => {
                     if memory.normalize() {
-                        memory.save();
+                        if let Err(error) = memory.save_to_path(path) {
+                            eprintln!("[Nimbus] 记忆整理后保存失败：{error}");
+                        }
                     }
-                    return memory;
+                    memory
                 }
+                Err(_) => {
+                    eprintln!("[Nimbus] 记忆格式无效，原文件已保留：{}", path.display());
+                    Self::default()
+                }
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
+            Err(error) => {
+                eprintln!("[Nimbus] 无法读取记忆，原文件未改动：{error}");
+                Self::default()
             }
         }
-        Self::default()
+    }
+
+    fn save_to_path(&self, path: &Path) -> io::Result<()> {
+        let contents =
+            serde_json::to_vec_pretty(self).map_err(|_| io::Error::other("记忆序列化失败"))?;
+        crate::storage::atomic_write(path, &contents, |existing| {
+            serde_json::from_str::<Self>(existing).is_ok()
+        })
     }
 
     pub fn save(&self) {
-        let path = Self::get_path();
-        if let Ok(json_str) = serde_json::to_string_pretty(self) {
-            let _ = fs::write(&path, json_str);
+        if let Err(error) = self.save_to_path(&Self::get_path()) {
+            eprintln!("[Nimbus] 记忆保存失败：{error}");
         }
     }
 
@@ -461,6 +483,33 @@ fn is_invalid_memory_app(app: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::test_support::TempDir;
+
+    #[test]
+    fn loads_partial_old_memory_without_losing_existing_counts() {
+        let dir = TempDir::new();
+        let path = dir.path("memory.json");
+        fs::write(&path, r#"{"touch_count": 4}"#).unwrap();
+        let memory = PetMemory::load_from_path(&path);
+        assert_eq!(memory.touch_count, 4);
+        assert_eq!(memory.growth_points, 4);
+        assert!(memory.app_usage.is_empty());
+        let saved: PetMemory = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved.touch_count, 4);
+    }
+
+    #[test]
+    fn retains_invalid_memory_until_save_then_preserves_a_backup() {
+        let dir = TempDir::new();
+        let path = dir.path("memory.json");
+        let damaged = b"{\"touch_count\": 7, ";
+        fs::write(&path, damaged).unwrap();
+        let memory = PetMemory::load_from_path(&path);
+        assert_eq!(fs::read(&path).unwrap(), damaged);
+        memory.save_to_path(&path).unwrap();
+        assert_eq!(fs::read(dir.path("memory.json.invalid")).unwrap(), damaged);
+        assert!(serde_json::from_slice::<PetMemory>(&fs::read(path).unwrap()).is_ok());
+    }
 
     #[test]
     fn ignores_numeric_app_names() {

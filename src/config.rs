@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(default)]
 pub struct AppConfig {
     pub model_path: Option<PathBuf>,
     pub adapter_path: Option<PathBuf>,
@@ -96,51 +98,171 @@ impl AppConfig {
     }
 
     pub fn load_or_create() -> Self {
-        let global_path = Self::get_config_path();
-
-        // 1. 优先读取位于用户家目录下的全局唯一的 ~/.nimbus_config.toml
-        if global_path.exists() {
-            if let Ok(content) = fs::read_to_string(&global_path) {
-                if let Ok(config) = toml::from_str::<Self>(&content) {
-                    return config;
-                }
-            }
-        }
-
-        // 2. 若全局配置文件不存在，尝试加载当前工作目录下原有的老版本地 config.toml 配置文件
-        let local_path = PathBuf::from("config.toml");
-        if local_path.exists() {
-            if let Ok(content) = fs::read_to_string(&local_path) {
-                if let Ok(config) = toml::from_str::<Self>(&content) {
-                    // 读取成功，将现有本地配置平滑迁移拷贝并持久化至家目录下，保证之前的 model_path 等设置不丢失
-                    let _ = config.save_to_path(&global_path);
-                    return config;
-                }
-            }
-        }
-
-        // 3. 都没有则直接使用系统默认配置，并在家目录下创建全局配置文件
-        let default_config = Self::default();
-        let _ = default_config.save_to_path(&global_path);
-        default_config
+        Self::load_from_paths(&Self::get_config_path(), Path::new("config.toml"))
     }
 
-    fn save_to_path(&self, path: &std::path::Path) -> Result<(), std::io::Error> {
-        if let Ok(toml_str) = toml::to_string_pretty(self) {
-            fs::write(path, toml_str)?;
+    fn load_from_paths(global_path: &Path, local_path: &Path) -> Self {
+        match fs::read_to_string(global_path) {
+            Ok(content) => match toml::from_str::<Self>(&content) {
+                Ok(mut config) => {
+                    config.normalize();
+                    return config;
+                }
+                Err(_) => {
+                    eprintln!(
+                        "[Nimbus] 配置格式无效，暂用默认设置；原文件已保留：{}",
+                        global_path.display()
+                    );
+                    return Self::default();
+                }
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                eprintln!("[Nimbus] 无法读取配置，原文件未改动：{error}");
+                return Self::default();
+            }
         }
-        Ok(())
+
+        // Only migrate a local configuration when the global file is absent.
+        let mut config = match fs::read_to_string(local_path) {
+            Ok(content) => toml::from_str::<Self>(&content).unwrap_or_else(|_| {
+                eprintln!(
+                    "[Nimbus] 本地配置格式无效，原文件已保留：{}",
+                    local_path.display()
+                );
+                Self::default()
+            }),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
+            Err(error) => {
+                eprintln!("[Nimbus] 无法读取旧配置：{error}");
+                Self::default()
+            }
+        };
+        config.normalize();
+        if let Err(error) = config.save_to_path(global_path) {
+            eprintln!("[Nimbus] 无法创建全局配置：{error}");
+        }
+        config
+    }
+
+    fn normalize(&mut self) {
+        self.pet_size = self.pet_size.clamp(64, 512);
+        self.idle_offload_secs = self.idle_offload_secs.clamp(5, 86_400);
+        self.bubble_timeout_secs = self.bubble_timeout_secs.clamp(1, 300);
+        self.touch_response_cooldown_secs = self.touch_response_cooldown_secs.clamp(1, 86_400);
+        self.mutter_interval_secs = self.mutter_interval_secs.clamp(15, 86_400);
+        self.dream_interval_secs = self.dream_interval_secs.clamp(15, 86_400);
+        self.font_size = if self.font_size.is_finite() {
+            self.font_size.clamp(12.0, 48.0)
+        } else {
+            default_font_size()
+        };
+        if !matches!(
+            self.persona.as_str(),
+            "default" | "tsundere" | "toxic" | "moe"
+        ) {
+            self.persona = default_persona();
+        }
+        if !matches!(
+            self.pet_style.as_str(),
+            "nimbus" | "mochi" | "starlit" | "crab" | "luma"
+        ) {
+            self.pet_style = default_pet_style();
+        }
+        if !matches!(
+            self.weather_mode.as_str(),
+            "sunny" | "windy" | "rainy" | "snowy"
+        ) {
+            self.weather_mode = default_weather_mode();
+        }
+    }
+
+    fn save_to_path(&self, path: &Path) -> io::Result<()> {
+        let mut config = self.clone();
+        config.normalize();
+        let contents =
+            toml::to_string_pretty(&config).map_err(|_| io::Error::other("配置序列化失败"))?;
+        crate::storage::atomic_write(path, contents.as_bytes(), |existing| {
+            toml::from_str::<Self>(existing).is_ok()
+        })
     }
 
     pub fn save(&self) {
-        let global_path = Self::get_config_path();
-        let _ = self.save_to_path(&global_path);
+        if let Err(error) = self.save_to_path(&Self::get_config_path()) {
+            eprintln!("[Nimbus] 配置保存失败：{error}");
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::test_support::TempDir;
+
+    #[test]
+    fn fills_all_missing_settings_in_minimal_old_config() {
+        let config: AppConfig = toml::from_str("pet_name = 'Old friend'").unwrap();
+        assert_eq!(config.pet_name, "Old friend");
+        assert_eq!(config.pet_size, 200);
+        assert_eq!(config.idle_offload_secs, 30);
+        assert!(config.mutter_enabled);
+    }
+
+    #[test]
+    fn normalizes_unsafe_settings_when_loading() {
+        let dir = TempDir::new();
+        let path = dir.path("config.toml");
+        fs::write(&path, "pet_size = 4294967295\nidle_offload_secs = 0\nfont_size = nan\nmutter_interval_secs = 9223372036854775807\npet_style = 'unknown'\npersona = 'unknown'\nweather_mode = 'unknown'").unwrap();
+        let config = AppConfig::load_from_paths(&path, &dir.path("missing.toml"));
+        assert_eq!(config.pet_size, 512);
+        assert_eq!(config.idle_offload_secs, 5);
+        assert_eq!(config.font_size, 24.0);
+        assert_eq!(config.mutter_interval_secs, 86_400);
+        assert_eq!(config.pet_style, "nimbus");
+        assert_eq!(config.persona, "default");
+        assert_eq!(config.weather_mode, "sunny");
+    }
+
+    #[test]
+    fn retains_corrupt_global_config_instead_of_migrating_over_it() {
+        let dir = TempDir::new();
+        let global_path = dir.path("global.toml");
+        let local_path = dir.path("local.toml");
+        fs::write(&global_path, "model_path = [broken").unwrap();
+        fs::write(&local_path, "pet_name = 'Legacy'").unwrap();
+        let config = AppConfig::load_from_paths(&global_path, &local_path);
+        assert_eq!(config.pet_name, "Nimbus");
+        assert_eq!(
+            fs::read_to_string(&global_path).unwrap(),
+            "model_path = [broken"
+        );
+
+        config.save_to_path(&global_path).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path("global.toml.invalid")).unwrap(),
+            "model_path = [broken"
+        );
+        assert!(toml::from_str::<AppConfig>(&fs::read_to_string(global_path).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn migrates_old_config_only_when_global_file_is_missing() {
+        let dir = TempDir::new();
+        let global_path = dir.path("global.toml");
+        let local_path = dir.path("local.toml");
+        fs::write(
+            &local_path,
+            "model_path = '/models/companion.gguf'\npet_name = 'Legacy'",
+        )
+        .unwrap();
+        let config = AppConfig::load_from_paths(&global_path, &local_path);
+        assert_eq!(config.pet_name, "Legacy");
+        assert_eq!(
+            config.model_path,
+            Some(PathBuf::from("/models/companion.gguf"))
+        );
+        assert!(global_path.exists());
+    }
 
     #[test]
     fn fills_frequency_defaults_for_old_config_files() {

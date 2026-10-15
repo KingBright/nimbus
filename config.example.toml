@@ -1,0 +1,12 @@
+# Nimbus 可在没有模型时离线陪伴。仅填写需要覆盖的选项即可。
+# 本机设置位置：~/.nimbus_config.toml；修改模型路径后重启。
+# 取消注释并替换为你自己的兼容 GGUF 模型绝对路径：
+# model_path = "/absolute/path/to/model.gguf"
+
+pet_name = "Nimbus"
+pet_style = "nimbus"
+pet_size = 200
+font_size = 24.0
+mutter_enabled = true
+idle_offload_secs = 30
+bubble_timeout_secs = 10
